@@ -1,0 +1,449 @@
+﻿
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Collections.Concurrent; // 스레드 안전한 딕셔너리
+using System.Threading.Tasks;
+using System.Threading; // CancellationTokenSource (타이머 취소용)
+using System.Linq; // Random.Shared
+using System.Collections.Generic; // List
+using MySqlConnector; // 9-A 단계에서 설치한 MySQL 드라이버
+
+// 9-B 단계에서 만든 Pokemon 모델 (파일이 같은 폴더에 있으므로 네임스페이스 불필요)
+// using PokemonChatServer.Models; 
+
+class Program
+{
+    // ========================================================================
+    // [서버 설정]
+    // ========================================================================
+
+    // [헤더("서버 포트")]
+    // [툴팁("GCP 방화벽에서 이 포트를 'tcp'로 열어야 합니다.")]
+    private const int ServerPort = 7777; // 7777 포트 사용 (기존 채팅 서버와 동일)
+
+    // [헤더("DB 연결 문자열")]
+    // [툴팁("이전에 API 서버의 appsettings.json에서 사용했던 값과 동일하게 입력합니다.")]
+    // [중요!] 님의 DB 비밀번호(예: PkM!api#2025)로 수정하세요!
+    private const string DbConnectionString = "server=localhost;port=3306;database=pokemon_db;user=root;password=PkM!api#2025";
+
+    // ========================================================================
+    // [서버 관리 변수]
+    // ========================================================================
+
+    // (기능 1, 2) 접속한 클라이언트 목록 (스레드 안전)
+    // Key: TcpClient (소켓)
+    // Value: string (유저 닉네임)
+    private static readonly ConcurrentDictionary<TcpClient, string> clients = new ConcurrentDictionary<TcpClient, string>();
+
+    // (기능 4, 5, 7) 퀴즈 상태를 관리하는 변수들
+    private static readonly object quizLock = new object(); // 퀴즈 시작/종료 시 동시 접근 방지용
+    private static bool isQuizActive = false; // 퀴즈가 현재 진행 중인지?
+    private static Pokemon? currentQuizAnswer = null; // 현재 퀴즈의 정답 포켓몬 객체
+    private static List<string>? currentQuizHints = null; // 현재 퀴즈의 힌트 목록
+    private static CancellationTokenSource? quizTimerCancelToken; // 힌트 타이머를 '취소'하기 위한 토큰
+
+    // ========================================================================
+    // [메인: 서버 시작]
+    // ========================================================================
+    static async Task Main(string[] args)
+    {
+        TcpListener server = new TcpListener(IPAddress.Any, ServerPort);
+        server.Start();
+        Console.WriteLine($"[INFO] 포켓몬 퀴즈 서버가 포트 {ServerPort}에서 시작되었습니다...");
+        Console.WriteLine($"[INFO] DB 연결 대상: {DbConnectionString.Substring(0, DbConnectionString.IndexOf("password="))}...");
+
+        // (기능 2) 클라이언트 접속을 비동기로 계속 대기
+        while (true)
+        {
+            TcpClient client = await server.AcceptTcpClientAsync();
+
+            // 클라이언트가 접속하면, HandleClientAsync 메서드를 '새 스레드'에서 실행
+            // (await를 붙이지 않아야 다음 클라이언트를 바로 받을 수 있음)
+            _ = HandleClientAsync(client);
+        }
+    }
+
+    // ========================================================================
+    // [기능 1, 2, 3, 7: 클라이언트 처리 및 채팅]
+    // ========================================================================
+    /// <summary>
+    /// 개별 클라이언트의 메시지 수신 및 처리를 담당합니다.
+    /// </summary>
+    private static async Task HandleClientAsync(TcpClient client)
+    {
+        NetworkStream stream = client.GetStream();
+        byte[] buffer = new byte[4096];
+        string nickname = string.Empty;
+
+        try
+        {
+            // (기능 1) 닉네임 로그인: 클라이언트의 '첫 번째' 메시지를 닉네임으로 간주
+            int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
+            if (bytesRead == 0) return; // 연결 직후 끊김
+
+            nickname = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+
+            // 닉네임이 유효한지 간단히 확인
+            if (string.IsNullOrEmpty(nickname) || nickname.Length > 12)
+            {
+                nickname = $"User{Random.Shared.Next(100, 999)}";
+            }
+
+            // 클라이언트 목록에 정식 등록
+            clients.TryAdd(client, nickname);
+            Console.WriteLine($"[INFO] '{nickname}' 님이 접속했습니다. (총 {clients.Count}명)");
+
+            // (기능 2) 채팅 서버 입장 완료: 본인에게 환영 메시지 전송
+            await SendMessageToClientAsync(client, $"[서버] '{nickname}'님, 환영합니다. '/퀴즈시작'을 입력해 퀴즈를 시작하세요.");
+
+            // (기능 2) 채팅 서버 입장 완료: 다른 모두에게 입장 알림
+            await BroadcastMessageAsync($"[서버] '{nickname}' 님이 입장했습니다.", client);
+
+            // (기능 2, 3, 7) 채팅 메시지 수신 루프
+            while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            {
+                string message = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+                if (string.IsNullOrEmpty(message)) continue;
+
+                Console.WriteLine($"[CHAT] {nickname}: {message}");
+
+                // --- 퀴즈 로직 검사 ---
+                bool isAnswer = false;
+                lock (quizLock)
+                {
+                    // (기능 7) 정답 판정: 퀴즈가 진행 중이고, 메시지가 정답과 일치하는가?
+                    if (isQuizActive && currentQuizAnswer != null &&
+                        message.Equals(currentQuizAnswer.SpeciesKorName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        isAnswer = true;
+                        // 정답을 맞혔으므로 즉시 퀴즈 종료 로직 호출
+                        // (BroadcastMessageAsync는 lock 바깥에서 호출해야 데드락이 안 걸림)
+                    }
+                }
+
+                if (isAnswer)
+                {
+                    // [기능 7] 정답자 발생!
+                    await BroadcastMessageAsync($"[정답!] '{nickname}' 님이 정답 '{currentQuizAnswer!.SpeciesKorName}'을(를) 맞혔습니다!", null);
+                    await StopQuizAsync(); // 퀴즈 즉시 종료
+                }
+                else if (message.Equals("/퀴즈시작", StringComparison.OrdinalIgnoreCase))
+                {
+                    // [기능 3] 퀴즈 시작 명령어
+                    await StartQuizAsync(); // 퀴즈 시작 로직 호출
+                }
+                else
+                {
+                    // [기능 2] 일반 채팅
+                    await BroadcastMessageAsync($"[{nickname}] {message}", client);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // 네트워크 오류 또는 클라이언트 연결 끊김
+            Console.WriteLine($"[WARN] '{nickname}' 님 접속 종료 또는 오류: {ex.Message}");
+        }
+        finally
+        {
+            // 클라이언트 목록에서 제거
+            clients.TryRemove(client, out _);
+            client.Close();
+            Console.WriteLine($"[INFO] '{nickname}' 님 퇴장. (남은 {clients.Count}명)");
+            await BroadcastMessageAsync($"[서버] '{nickname}' 님이 퇴장했습니다.", null);
+        }
+    }
+
+    // ========================================================================
+    // [기능 3, 4: 퀴즈 시작 및 DB 쿼리]
+    // ========================================================================
+    /// <summary>
+    /// 새 퀴즈를 시작합니다. (기능 3, 4)
+    /// </summary>
+    private static async Task StartQuizAsync()
+    {
+        lock (quizLock)
+        {
+            if (isQuizActive)
+            {
+                // TODO: 퀴즈 시작을 요청한 사람에게만 "이미 진행 중"이라고 귓속말
+                Console.WriteLine("[WARN] 이미 퀴즈가 진행 중이나, '/퀴즈시작' 요청이 또 들어옴.");
+                return;
+            }
+            isQuizActive = true; // 퀴즈 상태를 '진행 중'으로 변경
+            currentQuizAnswer = null; // 이전 정답 초기화
+            currentQuizHints = null; // 이전 힌트 초기화
+            quizTimerCancelToken = new CancellationTokenSource(); // 새 타이머 '취소 토큰' 생성
+        }
+
+        await BroadcastMessageAsync("[퀴즈] 새 퀴즈를 시작합니다! DB에서 문제를 가져오는 중...", null);
+
+        // (기능 4) DB에서 랜덤 포켓몬 1마리 가져오기
+        Pokemon? quiz = await GetRandomPokemonFromDbAsync();
+
+        if (quiz == null)
+        {
+            await BroadcastMessageAsync("[오류] DB에서 퀴즈를 가져오는 데 실패했습니다. 퀴즈를 종료합니다.", null);
+            await StopQuizAsync();
+            return;
+        }
+
+        // [핵심] 서버 메모리에 정답과 힌트 목록 저장
+        currentQuizAnswer = quiz;
+        currentQuizHints = GenerateHintList(quiz); // (기능 6) 힌트 목록 생성
+
+        Console.WriteLine($"[QUIZ] 퀴즈 시작. 정답: {quiz.SpeciesKorName} (ID: {quiz.Id})");
+        await BroadcastMessageAsync("[퀴즈] 문제를 가져왔습니다! 15초 후 첫 번째 힌트가 나갑니다.", null);
+
+        // (기능 5) 15초 힌트 타이머 시작
+        // (await를 붙이지 않아야 다른 채팅을 계속 처리할 수 있음)
+        _ = StartHintTimerAsync(quizTimerCancelToken.Token);
+    }
+
+    /// <summary>
+    /// [핵심 DB 쿼리] MySQL DB에 연결해 랜덤 포켓몬 1마리를 가져옵니다. (기능 4)
+    /// </summary>
+    private static async Task<Pokemon?> GetRandomPokemonFromDbAsync()
+    {
+        try
+        {
+            await using (var connection = new MySqlConnection(DbConnectionString))
+            {
+                await connection.OpenAsync(); // DB 연결
+
+                // [쿼리] 님이 원하셨던 'DB 쿼리 경험'의 핵심입니다.
+                var command = new MySqlCommand("SELECT * FROM Pokemons ORDER BY RAND() LIMIT 1;", connection);
+
+                await using (var reader = await command.ExecuteReaderAsync())
+                {
+                    if (await reader.ReadAsync())
+                    {
+                        // DB 결과를 Pokemon 객체로 '수동' 매핑
+                        // (MySqlConnector 에는 Dapper 같은 자동 매핑 기능이 없으므로,
+                        //  컬럼 이름을 정확히 알고 있어야 합니다.)
+                        return new Pokemon
+                        {
+                            Id = reader.GetInt32("Id"),
+                            DexId = reader.GetInt32("DexId"),
+                            SpeciesEngName = reader.GetString("SpeciesEngName"),
+                            SpeciesKorName = reader.GetString("SpeciesKorName"),
+                            FormId = reader.GetInt32("FormId"),
+                            FormEngName = reader.GetString("FormEngName"),
+                            FormKey = reader.GetString("FormKey"),
+                            TypeA = reader.GetString("TypeA"),
+                            TypeB = reader.IsDBNull("TypeB") ? null : reader.GetString("TypeB"),
+                            Generation = reader.GetInt32("Generation"),
+                            GenderUnknown = reader.GetBoolean("GenderUnknown"),
+                            GenderMale = reader.GetFloat("GenderMale"),
+                            GenderFemale = reader.GetFloat("GenderFemale"),
+                            EggSteps = reader.GetInt32("EggSteps"),
+                            EggGroup1 = reader.GetString("EggGroup1"),
+                            EggGroup2 = reader.IsDBNull("EggGroup2") ? null : reader.GetString("EggGroup2"),
+                            CatchRate = reader.GetInt32("CatchRate"),
+                            ExperienceGroup = reader.GetString("ExperienceGroup"),
+                            RarityCategory = reader.GetString("RarityCategory"),
+                            H = reader.GetInt32("H"),
+                            A = reader.GetInt32("A"),
+                            B = reader.GetInt32("B"),
+                            C = reader.GetInt32("C"),
+                            D = reader.GetInt32("D"),
+                            S = reader.GetInt32("S"),
+                            Total = reader.GetInt32("Total")
+                        };
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[DB 오류] 쿼리 실행 실패: {ex.Message}");
+        }
+        return null; // 실패
+    }
+
+
+    // ========================================================================
+    // [기능 5, 6: 힌트 생성 및 타이머]
+    // ========================================================================
+
+    /// <summary>
+    /// 15초마다 힌트를 하나씩 방송합니다. (기능 5)
+    /// </summary>
+    private static async Task StartHintTimerAsync(CancellationToken cancelToken)
+    {
+        if (currentQuizHints == null) return;
+
+        // 힌트 목록(총 5개)을 하나씩 순회
+        foreach (string hint in currentQuizHints)
+        {
+            try
+            {
+                // 15초 대기 (CancellationToken 덕분에 중간에 취소 가능)
+                await Task.Delay(TimeSpan.FromSeconds(15), cancelToken);
+            }
+            catch (TaskCanceledException)
+            {
+                // [정답!] 누군가 정답을 맞혀서 타이머가 '취소'됨
+                Console.WriteLine("[INFO] 힌트 타이머가 정상적으로 취소되었습니다.");
+                return;
+            }
+
+            // 15초가 지났으므로 힌트 방송
+            await BroadcastMessageAsync($"[힌트] {hint}", null);
+        }
+
+        // 5개의 힌트가 모두 나갔는데도 정답자가 없음
+        await Task.Delay(TimeSpan.FromSeconds(1), cancelToken); // 1초 더 대기
+        await BroadcastMessageAsync($"[시간 초과] 정답은 '{currentQuizAnswer?.SpeciesKorName}'였습니다!", null);
+        await StopQuizAsync(); // 퀴즈 자동 종료
+    }
+
+    /// <summary>
+    /// 퀴즈를 즉시 종료합니다. (정답을 맞혔거나, 시간 초과 시)
+    /// </summary>
+    private static async Task StopQuizAsync()
+    {
+        lock (quizLock)
+        {
+            if (!isQuizActive) return; // 이미 종료됨
+
+            Console.WriteLine("[INFO] 퀴즈 종료 로직 실행.");
+            isQuizActive = false;
+            currentQuizAnswer = null;
+            currentQuizHints = null;
+
+            // (기능 5) 실행 중인 15초 힌트 타이머를 '강제 취소'
+            quizTimerCancelToken?.Cancel();
+            quizTimerCancelToken = null;
+        }
+        await Task.Delay(1000); // 1초 대기
+        await BroadcastMessageAsync("[퀴즈] 퀴즈가 종료되었습니다. '/퀴즈시작'으로 다시 시작할 수 있습니다.", null);
+    }
+
+    /// <summary>
+    /// 포켓몬 객체를 받아 5개의 힌트 목록을 생성합니다. (기능 6)
+    /// </summary>
+    private static List<string> GenerateHintList(Pokemon quiz)
+    {
+        // 1. (기능 6) 8개의 원본 힌트 후보 생성
+        var hintPool = new List<string>
+        {
+            $"도감 번호: {quiz.DexId}",
+            $"세대: {quiz.Generation}세대",
+            $"레어도: {quiz.RarityCategory}",
+            $"타입 A: {quiz.TypeA}",
+            // 타입 B는 'null'일 수 있으므로(파이리 등), '없음'으로 표시
+            $"타입 B: {quiz.TypeB ?? "없음"}",
+            $"총합 종족값: {quiz.Total}",
+            // 성비가 없는 포켓몬(GenderUnknown) 처리
+            quiz.GenderUnknown ? "성별: 없음" : $"성비(남/여): {quiz.GenderMale}% / {quiz.GenderFemale}%",
+            $"알 그룹 1: {quiz.EggGroup1}"
+        };
+
+        // 2. 8개 중 4개를 '랜덤으로' 섞어서 선택 (기능 6의 '랜덤 4개')
+        var randomHints = hintPool.OrderBy(h => Random.Shared.Next()).Take(4).ToList();
+
+        // 3. (기능 6) '초성 힌트' 생성 및 추가
+        string choseongHint = GetChoseong(quiz.SpeciesKorName);
+        randomHints.Add($"초성 힌트: {choseongHint}"); // 5번째 힌트로 추가
+
+        return randomHints;
+    }
+
+    /// <summary>
+    /// (기능 6) 한국어 문자열을 받아 '초성'만 추출합니다. (예: "주리비얀" -> "ㅈㄹㅂㅇ")
+    /// </summary>
+    private static string GetChoseong(string koreanText)
+    {
+        if (string.IsNullOrEmpty(koreanText)) return "";
+
+        // 유니코드 '가' ~ '힣' 범위의 시작과 끝
+        const int GAH = 44032; // <--- 10진수 숫자로 변경
+        const int HEEH = 55203; // <--- 10진수 숫자로 변경
+
+        // 초성 19개 배열 (순서 중요)
+        char[] choseongList = { 'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ' };
+
+        StringBuilder sb = new StringBuilder();
+        foreach (char c in koreanText)
+        {
+            // 1. 문자가 '가' ~ '힣' 범위의 한글인지 확인
+            if (c >= GAH && c <= HEEH)
+            {
+                // 2. 유니코드 값을 이용해 초성 인덱스 계산
+                int choseongIndex = (c - GAH) / (21 * 28);
+                sb.Append(choseongList[choseongIndex]);
+            }
+            else
+            {
+                // 한글이 아니면(영어, 숫자, 공백) 그대로 추가
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
+    }
+
+
+    // ========================================================================
+    // [헬퍼: 메시지 전송]
+    // ========================================================================
+
+    /// <summary>
+    /// 모든 클라이언트에게 메시지를 방송(Broadcast)합니다.
+    /// 'sender'가 null이 아니면, 그 클라이언트는 제외합니다 (선택).
+    /// </summary>
+    private static async Task BroadcastMessageAsync(string message, TcpClient? sender)
+    {
+        Console.WriteLine($"[BROADCAST] {message}"); // 서버 로그에도 기록
+        byte[] data = Encoding.UTF8.GetBytes(message + "\n"); // (Unity 클라이언트를 위해 개행 문자 추가)
+
+        List<TcpClient> disconnectedClients = new List<TcpClient>();
+
+        // 현재 접속 중인 모든 클라이언트에게 전송
+        foreach (var clientEntry in clients)
+        {
+            TcpClient client = clientEntry.Key;
+
+            // 메시지를 보낸 사람(sender)에게는 다시 보내지 않음 (선택 사항)
+            // (지금은 정답자도 정답 메시지를 봐야 하므로 이 코드는 주석 처리)
+            // if (client == sender) continue;
+
+            try
+            {
+                NetworkStream stream = client.GetStream();
+                await stream.WriteAsync(data, 0, data.Length);
+            }
+            catch (Exception)
+            {
+                // 전송 실패 (연결이 끊어진 클라이언트)
+                disconnectedClients.Add(client);
+            }
+        }
+
+        // 목록에서 연결 끊긴 클라이언트들 정리 (나중에)
+        // (실제 프로덕션에서는 이 부분을 더 견고하게 처리해야 합니다.)
+        // foreach (var client in disconnectedClients)
+        // {
+        //     clients.TryRemove(client, out _);
+        // }
+    }
+
+    /// <summary>
+    /// 특정 클라이언트 1명에게만 메시지를 보냅니다. (귓속말)
+    /// </summary>
+    private static async Task SendMessageToClientAsync(TcpClient client, string message)
+    {
+        try
+        {
+            byte[] data = Encoding.UTF8.GetBytes(message + "\n");
+            NetworkStream stream = client.GetStream();
+            await stream.WriteAsync(data, 0, data.Length);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[WARN] 귓속말 전송 실패: {ex.Message}");
+        }
+    }
+}
