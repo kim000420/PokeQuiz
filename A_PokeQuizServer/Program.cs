@@ -177,7 +177,7 @@ class Program
             quizTimerCancelToken = new CancellationTokenSource(); // 새 타이머 '취소 토큰' 생성
         }
 
-        await BroadcastMessageAsync("[퀴즈] 새 퀴즈를 시작합니다! DB에서 문제를 가져오는 중...", null);
+        await BroadcastMessageAsync("[퀴즈] 포켓몬 퀴즈를 시작합니다!", null);
 
         // (기능 4) DB에서 랜덤 포켓몬 1마리 가져오기
         Pokemon? quiz = await GetRandomPokemonFromDbAsync();
@@ -198,7 +198,13 @@ class Program
 
         // (기능 5) 15초 힌트 타이머 시작
         // (await를 붙이지 않아야 다른 채팅을 계속 처리할 수 있음)
-        _ = StartHintTimerAsync(quizTimerCancelToken.Token);
+        if (currentQuizHints != null && currentQuizHints.Count > 0)
+        {
+            await BroadcastMessageAsync($"[힌트] {currentQuizHints[0]}", null);
+        }
+
+        //  15초 힌트 타이머는 '두 번째 힌트부터'(.Skip(1)) 시작
+        _ = StartHintTimerAsync(currentQuizHints.Skip(1), quizTimerCancelToken.Token);
     }
 
     /// <summary>
@@ -270,16 +276,16 @@ class Program
     /// <summary>
     /// 15초마다 힌트를 하나씩 방송합니다. (기능 5)
     /// </summary>
-    private static async Task StartHintTimerAsync(CancellationToken cancelToken)
+    private static async Task StartHintTimerAsync(IEnumerable<string> remainingHints, CancellationToken cancelToken)
     {
         if (currentQuizHints == null) return;
 
-        // 힌트 목록(총 5개)을 하나씩 순회
-        foreach (string hint in currentQuizHints)
+        // .Skip(1)로 받은 '나머지 힌트'(4개)를 순회
+        foreach (string hint in remainingHints)
         {
             try
             {
-                // 15초 대기 (CancellationToken 덕분에 중간에 취소 가능)
+                // 1. 15초 대기
                 await Task.Delay(TimeSpan.FromSeconds(15), cancelToken);
             }
             catch (TaskCanceledException)
@@ -289,12 +295,24 @@ class Program
                 return;
             }
 
-            // 15초가 지났으므로 힌트 방송
+            // 2. 15초가 지났으므로 다음 힌트 방송 (2~5번 힌트)
             await BroadcastMessageAsync($"[힌트] {hint}", null);
         }
 
-        // 5개의 힌트가 모두 나갔는데도 정답자가 없음
-        await Task.Delay(TimeSpan.FromSeconds(1), cancelToken); // 1초 더 대기
+        // 모든 힌트(초성 포함)가 나간 후, 정답을 맞힐 '마지막 15초'를 기다립니다.
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(15), cancelToken);
+        }
+        catch (TaskCanceledException)
+        {
+            // 마지막 15초 안에 정답을 맞힘
+            Console.WriteLine("[INFO] (최종) 힌트 타이머가 정상적으로 취소되었습니다.");
+            return;
+        }
+
+        // [수정됨 - 요구사항 3]
+        // 15초가 지났는데도 정답자가 없음 (시간 초과)
         await BroadcastMessageAsync($"[시간 초과] 정답은 '{currentQuizAnswer?.SpeciesKorName}'였습니다!", null);
         await StopQuizAsync(); // 퀴즈 자동 종료
     }
@@ -318,7 +336,7 @@ class Program
             quizTimerCancelToken = null;
         }
         await Task.Delay(1000); // 1초 대기
-        await BroadcastMessageAsync("[퀴즈] 퀴즈가 종료되었습니다. '/퀴즈시작'으로 다시 시작할 수 있습니다.", null);
+        await BroadcastMessageAsync("[퀴즈] 퀴즈가 종료되었습니다.\n[퀴즈] '/퀴즈시작'으로 다시 시작할 수 있습니다.", null);
     }
 
     /// <summary>
@@ -326,29 +344,32 @@ class Program
     /// </summary>
     private static List<string> GenerateHintList(Pokemon quiz)
     {
-        // 1. (기능 6) 8개의 원본 힌트 후보 생성
+        var finalHintList = new List<string>(5);
+
+        // 1번 힌트는 '타입 A/B'로 고정
+        string typeHint = $"[ 타입 ]\n{quiz.TypeA} / {quiz.TypeB ?? "단일"}";
+        finalHintList.Add(typeHint);
+
+        // 나머지 힌트 풀 (6개) 생성
         var hintPool = new List<string>
         {
-            $"도감 번호: {quiz.DexId}",
-            $"세대: {quiz.Generation}세대",
-            $"레어도: {quiz.RarityCategory}",
-            $"타입 A: {quiz.TypeA}",
-            // 타입 B는 'null'일 수 있으므로(파이리 등), '없음'으로 표시
-            $"타입 B: {quiz.TypeB ?? "없음"}",
-            $"총합 종족값: {quiz.Total}",
-            // 성비가 없는 포켓몬(GenderUnknown) 처리
-            quiz.GenderUnknown ? "성별: 없음" : $"성비(남/여): {quiz.GenderMale}% / {quiz.GenderFemale}%",
-            $"알 그룹 1: {quiz.EggGroup1}"
+            $"[ 도감 번호 ]\n{quiz.DexId}",
+            $"[ 등장 세대 ]\n{quiz.Generation}세대",
+            $"[ 레어도 ]\n{quiz.RarityCategory}",
+            $"[ 총합 종족값 ]\n{quiz.Total}",
+            quiz.GenderUnknown ? "[ 성별 ]\n없음(무성)" : $"[ 성비(남/여) ]\n{quiz.GenderMale}% / {quiz.GenderFemale}%",
+            $"[ 영어 이름 ]\n{quiz.FormEngName}"
         };
 
-        // 2. 8개 중 4개를 '랜덤으로' 섞어서 선택 (기능 6의 '랜덤 4개')
-        var randomHints = hintPool.OrderBy(h => Random.Shared.Next()).Take(4).ToList();
+        // 6개 중 3개를 '랜덤으로' 섞어서 2, 3, 4번 힌트로 추가
+        var randomHints = hintPool.OrderBy(h => Random.Shared.Next()).Take(3).ToList();
+        finalHintList.AddRange(randomHints);
 
-        // 3. (기능 6) '초성 힌트' 생성 및 추가
+        // 5번 힌트는 '초성'으로 고정
         string choseongHint = GetChoseong(quiz.SpeciesKorName);
-        randomHints.Add($"초성 힌트: {choseongHint}"); // 5번째 힌트로 추가
+        finalHintList.Add($"[ 초성 힌트 ]\n{choseongHint}"); // 5번째 힌트로 추가
 
-        return randomHints;
+        return finalHintList;
     }
 
     /// <summary>
