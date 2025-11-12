@@ -21,11 +21,10 @@ class Program
 
     // [헤더("서버 포트")]
     // [툴팁("GCP 방화벽에서 이 포트를 'tcp'로 열어야 합니다.")]
-    private const int ServerPort = 7777; // 7777 포트 사용 (기존 채팅 서버와 동일)
+    private const int ServerPort = 7777;
 
     // [헤더("DB 연결 문자열")]
     // [툴팁("이전에 API 서버의 appsettings.json에서 사용했던 값과 동일하게 입력합니다.")]
-    // [중요!] 님의 DB 비밀번호(예: PkM!api#2025)로 수정하세요!
     private const string DbConnectionString = "server=localhost;port=3306;database=pokemon_db;user=root;password=PkM!api#2025";
 
     // ========================================================================
@@ -233,14 +232,14 @@ class Program
                             FormEngName = reader.GetString("FormEngName"),
                             FormKey = reader.GetString("FormKey"),
                             TypeA = reader.GetString("TypeA"),
-                            TypeB = reader.IsDBNull("TypeB") ? null : reader.GetString("TypeB"),
+                            TypeB = reader.IsDBNull(reader.GetOrdinal("TypeB")) ? null : reader.GetString("TypeB"),
                             Generation = reader.GetInt32("Generation"),
                             GenderUnknown = reader.GetBoolean("GenderUnknown"),
                             GenderMale = reader.GetFloat("GenderMale"),
                             GenderFemale = reader.GetFloat("GenderFemale"),
                             EggSteps = reader.GetInt32("EggSteps"),
                             EggGroup1 = reader.GetString("EggGroup1"),
-                            EggGroup2 = reader.IsDBNull("EggGroup2") ? null : reader.GetString("EggGroup2"),
+                            EggGroup2 = reader.IsDBNull(reader.GetOrdinal("EggGroup2")) ? null : reader.GetString("EggGroup2"),
                             CatchRate = reader.GetInt32("CatchRate"),
                             ExperienceGroup = reader.GetString("ExperienceGroup"),
                             RarityCategory = reader.GetString("RarityCategory"),
@@ -360,8 +359,8 @@ class Program
         if (string.IsNullOrEmpty(koreanText)) return "";
 
         // 유니코드 '가' ~ '힣' 범위의 시작과 끝
-        const int GAH = 44032; // <--- 10진수 숫자로 변경
-        const int HEEH = 55203; // <--- 10진수 숫자로 변경
+        const int GAH = 44032;
+        const int HEEH = 55203;
 
         // 초성 19개 배열 (순서 중요)
         char[] choseongList = { 'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ' };
