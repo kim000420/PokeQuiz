@@ -18,25 +18,24 @@ class Program
     // ========================================================================
     // [서버 설정]
     // ========================================================================
-
-    // [헤더("서버 포트")]
-    // [툴팁("GCP 방화벽에서 이 포트를 'tcp'로 열어야 합니다.")]
+    
+    // 구글 클라우드 서버 포트
     private const int ServerPort = 7777;
 
-    // [헤더("DB 연결 문자열")]
-    // [툴팁("이전에 API 서버의 appsettings.json에서 사용했던 값과 동일하게 입력합니다.")]
+    // DB 연결 문자열
+    // 이전에 API 서버의 appsettings.json에서 사용했던 값과 동일하게 입력 필요
     private const string DbConnectionString = "server=localhost;port=3306;database=pokemon_db;user=root;password=PkM!api#2025";
 
     // ========================================================================
     // [서버 관리 변수]
     // ========================================================================
 
-    // (기능 1, 2) 접속한 클라이언트 목록 (스레드 안전)
+    // 접속한 클라이언트 목록
     // Key: TcpClient (소켓)
     // Value: string (유저 닉네임)
     private static readonly ConcurrentDictionary<TcpClient, string> clients = new ConcurrentDictionary<TcpClient, string>();
 
-    // (기능 4, 5, 7) 퀴즈 상태를 관리하는 변수들
+    // 퀴즈 상태를 관리하는 변수들
     private static readonly object quizLock = new object(); // 퀴즈 시작/종료 시 동시 접근 방지용
     private static bool isQuizActive = false; // 퀴즈가 현재 진행 중인지?
     private static Pokemon? currentQuizAnswer = null; // 현재 퀴즈의 정답 포켓몬 객체
@@ -90,9 +89,23 @@ class Program
                 nickname = $"User{Random.Shared.Next(100, 999)}";
             }
 
+            // DB 트랜잭션을 통한 회원가입/로그인 시도
+            bool isLoginSuccess = await RegisterOrLoginUserAsync(nickname);
+            if (!isLoginSuccess)
+            {
+                // DB 오류 시 접속 거부
+                await SendMessageToClientAsync(client, "[오류] 서버 DB 문제로 접속할 수 없습니다.");
+                client.Close();
+                return;
+            }
+
             // 클라이언트 목록에 정식 등록
             clients.TryAdd(client, nickname);
             Console.WriteLine($"[INFO] '{nickname}' 님이 접속했습니다. (총 {clients.Count}명)");
+
+            // [추가됨] 접속자 수 방송 & 내 점수 전송
+            await BroadcastUserCountAsync();
+            await SendMyScoreAsync(client, nickname); // 로그인하자마자 내 점수 갱신
 
             // (기능 2) 채팅 서버 입장 완료: 본인에게 환영 메시지 전송
             await SendMessageToClientAsync(client, $"[서버] '{nickname}'님, 환영합니다. '/퀴즈시작'을 입력해 퀴즈를 시작하세요.");
@@ -112,7 +125,7 @@ class Program
                 bool isAnswer = false;
                 lock (quizLock)
                 {
-                    // (기능 7) 정답 판정: 퀴즈가 진행 중이고, 메시지가 정답과 일치하는가?
+                    // 정답 판정: 퀴즈가 진행 중이고, 메시지가 정답과 일치하는가?
                     if (isQuizActive && currentQuizAnswer != null &&
                         message.Equals(currentQuizAnswer.SpeciesKorName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -124,18 +137,27 @@ class Program
 
                 if (isAnswer)
                 {
-                    // [기능 7] 정답자 발생!
+                    // 정답자 발생
                     await BroadcastMessageAsync($"[정답!] '{nickname}' 님이 정답 '{currentQuizAnswer!.SpeciesKorName}'을(를) 맞혔습니다!", null);
-                    await StopQuizAsync(); // 퀴즈 즉시 종료
+
+                    // 점수 업데이트 트랜잭션 실행
+                    var currentPlayers = clients.Values.ToList();
+                    await UpdateGameResultAsync(nickname, currentPlayers);
+
+                    // 승리한 유저에게 '갱신된 점수' 다시 전송
+                    await SendMyScoreAsync(client, nickname);
+                    
+                    // 퀴즈 즉시 종료
+                    await StopQuizAsync(); 
                 }
                 else if (message.Equals("/퀴즈시작", StringComparison.OrdinalIgnoreCase))
                 {
-                    // [기능 3] 퀴즈 시작 명령어
+                    // 퀴즈 시작 명령어
                     await StartQuizAsync(); // 퀴즈 시작 로직 호출
                 }
                 else
                 {
-                    // [기능 2] 일반 채팅
+                    // 일반 채팅
                     await BroadcastMessageAsync($"[{nickname}] {message}", client);
                 }
             }
@@ -150,6 +172,10 @@ class Program
             // 클라이언트 목록에서 제거
             clients.TryRemove(client, out _);
             client.Close();
+
+            // 접속자 수 갱신 방송
+            _ = BroadcastUserCountAsync();
+
             Console.WriteLine($"[INFO] '{nickname}' 님 퇴장. (남은 {clients.Count}명)");
             await BroadcastMessageAsync($"[서버] '{nickname}' 님이 퇴장했습니다.", null);
         }
@@ -464,6 +490,111 @@ class Program
         catch (Exception ex)
         {
             Console.WriteLine($"[WARN] 귓속말 전송 실패: {ex.Message}");
+        }
+    }
+
+    // ========================================================================
+    // [로그인 및 트랜잭션]
+    // ========================================================================
+
+    /// <summary>
+    /// [핵심] 트랜잭션을 사용하여 신규 유저를 등록하거나, 기존 유저로 로그인합니다.
+    /// </summary>
+    private static async Task<bool> RegisterOrLoginUserAsync(string nickname)
+    {
+        using (var connection = new MySqlConnection(DbConnectionString))
+        {
+            await connection.OpenAsync();
+
+            // 1. 트랜잭션 시작 (이 시점부터는 '성공' 아니면 '없던 일'입니다)
+            using (var transaction = await connection.BeginTransactionAsync())
+            {
+                try
+                {
+                    // [Step 1] Users 테이블에 닉네임 삽입 시도
+                    // (만약 이미 존재하는 닉네임이면 여기서 예외가 발생하여 catch로 갑니다 -> 로그인 처리)
+                    var insertUserCmd = new MySqlCommand("INSERT INTO Users (Nickname) VALUES (@nickname);", connection, transaction);
+                    insertUserCmd.Parameters.AddWithValue("@nickname", nickname);
+                    await insertUserCmd.ExecuteNonQueryAsync();
+
+                    // [Step 2] 방금 생성된 유저의 ID 가져오기
+                    long newUserId = insertUserCmd.LastInsertedId;
+
+                    // [Step 3] Scoreboard 테이블 초기화 (0승 0패)
+                    var insertScoreCmd = new MySqlCommand("INSERT INTO Scoreboard (UserId, Wins, Losses) VALUES (@userId, 0, 0);", connection, transaction);
+                    insertScoreCmd.Parameters.AddWithValue("@userId", newUserId);
+                    await insertScoreCmd.ExecuteNonQueryAsync();
+
+                    // [Step 4] 모든 작업 성공! 커밋(Commit)하여 진짜로 저장합니다.
+                    await transaction.CommitAsync();
+                    Console.WriteLine($"[DB] 신규 유저 '{nickname}' 등록 완료 (트랜잭션 성공)");
+                    return true; // 신규 등록 성공
+                }
+                catch (MySqlException ex)
+                {
+                    // 오류 번호 1062: Duplicate entry (중복된 닉네임)
+                    if (ex.Number == 1062)
+                    {
+                        // 이미 있는 유저이므로, 롤백할 필요 없이 그냥 '로그인'으로 처리
+                        // (트랜잭션은 자동으로 롤백됩니다)
+                        Console.WriteLine($"[DB] 기존 유저 '{nickname}' 로그인 성공.");
+                        return true; // 로그인 성공
+                    }
+                    else
+                    {
+                        // 진짜 DB 오류인 경우
+                        Console.WriteLine($"[DB 오류] 트랜잭션 실패, 롤백합니다: {ex.Message}");
+                        await transaction.RollbackAsync(); // [중요] 롤백! (Users에 들어간 데이터도 취소됨)
+                        return false; // 실패
+                    }
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // [접속자 수 & 점수 전송]
+    // ========================================================================
+
+    /// <summary>
+    /// 모든 유저에게 '현재 접속자 수'를 방송합니다. (태그: [USER_COUNT])
+    /// </summary>
+    private static async Task BroadcastUserCountAsync()
+    {
+        int count = clients.Count;
+        // 예: "[USER_COUNT] 5"
+        await BroadcastMessageAsync($"[USER_COUNT] {count}", null);
+    }
+
+    /// <summary>
+    /// 특정 유저에게 '자신의 승리 횟수(점수)'를 DB에서 조회하여 보냅니다. (태그: [MY_SCORE])
+    /// </summary>
+    private static async Task SendMyScoreAsync(TcpClient client, string nickname)
+    {
+        try
+        {
+            using (var connection = new MySqlConnection(DbConnectionString))
+            {
+                await connection.OpenAsync();
+                // Users 테이블과 조인하여 해당 닉네임의 Wins(승리 수)를 가져옴
+                string sql = @"
+                    SELECT s.Wins FROM Scoreboard s
+                    JOIN Users u ON s.UserId = u.Id
+                    WHERE u.Nickname = @nickname;";
+
+                var cmd = new MySqlCommand(sql, connection);
+                cmd.Parameters.AddWithValue("@nickname", nickname);
+
+                object? result = await cmd.ExecuteScalarAsync();
+                int wins = result != null ? Convert.ToInt32(result) : 0;
+
+                // 예: "[MY_SCORE] 10"
+                await SendMessageToClientAsync(client, $"[MY_SCORE] {wins}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[DB 오류] 점수 조회 실패({nickname}): {ex.Message}");
         }
     }
 }
