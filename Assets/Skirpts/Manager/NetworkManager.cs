@@ -5,7 +5,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
-using System.Collections.Concurrent; // 10단계의 MainThreadDispatcher를 위해
+using System.Collections.Concurrent;
 
 /// <summary>
 /// [싱글톤] VM 서버와의 모든 TCP 통신을 전담하는 '주체(Subject)'입니다.
@@ -22,7 +22,7 @@ public class NetworkManager : MonoBehaviour
             if (_instance == null)
             {
                 // 씬에서 인스턴스를 찾거나, 없으면 새로 생성
-                _instance = FindObjectOfType<NetworkManager>();
+                _instance = FindAnyObjectByType<NetworkManager>();
                 if (_instance == null)
                 {
                     GameObject go = new GameObject("NetworkManager");
@@ -39,11 +39,12 @@ public class NetworkManager : MonoBehaviour
     /// UI(옵저버)들이 이 이벤트를 '구독'합니다.
     /// </summary>
     public static event Action<string> OnMessageReceived;
-
-    /// <summary>
-    /// 서버 연결 상태가 변경될 때 발생하는 이벤트입니다.
-    /// </summary>
+    //서버 연결 상태가 변경될 때 발생하는 이벤트입니다.
     public static event Action<bool> OnConnectionStateChanged;
+    // 접속자 수 변경 이벤트 (int)
+    public static event Action<int> OnUserCountReceived;
+    // 내 점수 갱신 이벤트 (int)
+    public static event Action<int> OnMyScoreReceived;
 
 
     [Header("서버 정보")]
@@ -57,7 +58,7 @@ public class NetworkManager : MonoBehaviour
     private NetworkStream _stream;
     private bool _isConnected = false;
 
-    // --- 3. Unity 생명주기 ---
+    // --- Unity 생명주기 ---
     private void Awake()
     {
         // 싱글톤 인스턴스 관리
@@ -82,10 +83,10 @@ public class NetworkManager : MonoBehaviour
         DisconnectFromServer();
     }
 
-    // --- 4. 핵심 TCP 통신 로직 ---
+    // --- 핵심 TCP 통신 로직 ---
 
     /// <summary>
-    /// (기능 1) 서버에 접속하고 닉네임을 전송합니다.
+    /// 서버에 접속하고 닉네임을 전송합니다.
     /// </summary>
     private async Task ConnectToServerAsync()
     {
@@ -104,7 +105,7 @@ public class NetworkManager : MonoBehaviour
                 OnConnectionStateChanged?.Invoke(true)
             );
 
-            // (기능 1) 접속 직후, 닉네임을 서버로 전송
+            // 접속 직후, 닉네임을 서버로 전송
             await SendMessageToServerAsync(nickname);
 
             // 서버로부터 메시지를 계속 수신하는 루프 시작
@@ -140,7 +141,29 @@ public class NetworkManager : MonoBehaviour
 
                 string message = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
 
-                // [핵심] 메시지를 UI로 직접 보내지 않고, '메인 스레드'에서 '이벤트'를 방송(Invoke)합니다.
+                // 태그 파싱 로직
+                if (message.StartsWith("[USER_COUNT]"))
+                {
+                    // 예: "[USER_COUNT] 5" -> "5" 파싱
+                    string countStr = message.Substring("[USER_COUNT]".Length).Trim();
+                    if (int.TryParse(countStr, out int count))
+                    {
+                        MainThreadDispatcher.ExecuteOnMainThread(() => OnUserCountReceived?.Invoke(count));
+                    }
+                    continue; // 채팅 로그에는 표시 안 함
+                }
+                else if (message.StartsWith("[MY_SCORE]"))
+                {
+                    // 예: "[MY_SCORE] 10" -> "10" 파싱
+                    string scoreStr = message.Substring("[MY_SCORE]".Length).Trim();
+                    if (int.TryParse(scoreStr, out int score))
+                    {
+                        MainThreadDispatcher.ExecuteOnMainThread(() => OnMyScoreReceived?.Invoke(score));
+                    }
+                    continue; // 채팅 로그에는 표시 안 함
+                }
+
+                // 메시지를 UI로 직접 보내지 않고, '메인 스레드'에서 '이벤트'를 방송(Invoke)합니다.
                 MainThreadDispatcher.ExecuteOnMainThread(() =>
                     OnMessageReceived?.Invoke(message)
                 );
