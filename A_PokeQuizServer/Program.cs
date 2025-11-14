@@ -10,9 +10,6 @@ using System.Linq; // Random.Shared
 using System.Collections.Generic; // List
 using MySqlConnector; // 9-A 단계에서 설치한 MySQL 드라이버
 
-// 9-B 단계에서 만든 Pokemon 모델 (파일이 같은 폴더에 있으므로 네임스페이스 불필요)
-// using PokemonChatServer.Models; 
-
 class Program
 {
     // ========================================================================
@@ -22,8 +19,11 @@ class Program
     // 구글 클라우드 서버 포트
     private const int ServerPort = 7777;
 
+    // 최대 접속 인원
+    private const int MaxPlayers = 6;
+
     // DB 연결 문자열
-    // 이전에 API 서버의 appsettings.json에서 사용했던 값과 동일하게 입력 필요
+    // API 서버의 appsettings.json에서 사용했던 값과 동일하게 입력 필요
     private const string DbConnectionString = "server=localhost;port=3306;database=pokemon_db;user=root;password=PkM!api#2025";
 
     // ========================================================================
@@ -52,19 +52,16 @@ class Program
         Console.WriteLine($"[INFO] 포켓몬 퀴즈 서버가 포트 {ServerPort}에서 시작되었습니다...");
         Console.WriteLine($"[INFO] DB 연결 대상: {DbConnectionString.Substring(0, DbConnectionString.IndexOf("password="))}...");
 
-        // (기능 2) 클라이언트 접속을 비동기로 계속 대기
+        // 클라이언트 접속을 비동기로 계속 대기
         while (true)
         {
             TcpClient client = await server.AcceptTcpClientAsync();
-
-            // 클라이언트가 접속하면, HandleClientAsync 메서드를 '새 스레드'에서 실행
-            // (await를 붙이지 않아야 다음 클라이언트를 바로 받을 수 있음)
             _ = HandleClientAsync(client);
         }
     }
 
     // ========================================================================
-    // [기능 1, 2, 3, 7: 클라이언트 처리 및 채팅]
+    // [클라이언트 처리 및 채팅]
     // ========================================================================
     /// <summary>
     /// 개별 클라이언트의 메시지 수신 및 처리를 담당합니다.
@@ -77,7 +74,7 @@ class Program
 
         try
         {
-            // (기능 1) 닉네임 로그인: 클라이언트의 '첫 번째' 메시지를 닉네임으로 간주
+            // 닉네임 로그인: 클라이언트의 '첫 번째' 메시지를 닉네임으로 간주
             int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
             if (bytesRead == 0) return; // 연결 직후 끊김
 
@@ -103,17 +100,17 @@ class Program
             clients.TryAdd(client, nickname);
             Console.WriteLine($"[INFO] '{nickname}' 님이 접속했습니다. (총 {clients.Count}명)");
 
-            // [추가됨] 접속자 수 방송 & 내 점수 전송
+            // 접속자 수 방송 & 내 점수 전송
             await BroadcastUserCountAsync();
-            await SendMyScoreAsync(client, nickname); // 로그인하자마자 내 점수 갱신
+            await BroadcastUserListAsync();// 로그인하자마자 내 점수 갱신
 
-            // (기능 2) 채팅 서버 입장 완료: 본인에게 환영 메시지 전송
+            // 채팅 서버 입장 완료: 본인에게 환영 메시지 전송
             await SendMessageToClientAsync(client, $"[서버] '{nickname}'님, 환영합니다. '/퀴즈시작'을 입력해 퀴즈를 시작하세요.");
 
-            // (기능 2) 채팅 서버 입장 완료: 다른 모두에게 입장 알림
+            // 채팅 서버 입장 완료: 다른 모두에게 입장 알림
             await BroadcastMessageAsync($"[서버] '{nickname}' 님이 입장했습니다.", client);
 
-            // (기능 2, 3, 7) 채팅 메시지 수신 루프
+            // 채팅 메시지 수신 루프
             while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
             {
                 string message = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
@@ -142,10 +139,10 @@ class Program
 
                     // 점수 업데이트 트랜잭션 실행
                     var currentPlayers = clients.Values.ToList();
-                    await UpdateGameResultAsync(nickname, currentPlayers);
+                    await UpdateGameResultAsync(nickname);
 
                     // 승리한 유저에게 '갱신된 점수' 다시 전송
-                    await SendMyScoreAsync(client, nickname);
+                    await BroadcastUserListAsync();
                     
                     // 퀴즈 즉시 종료
                     await StopQuizAsync(); 
@@ -175,6 +172,7 @@ class Program
 
             // 접속자 수 갱신 방송
             _ = BroadcastUserCountAsync();
+            _ = BroadcastUserListAsync();
 
             Console.WriteLine($"[INFO] '{nickname}' 님 퇴장. (남은 {clients.Count}명)");
             await BroadcastMessageAsync($"[서버] '{nickname}' 님이 퇴장했습니다.", null);
@@ -182,10 +180,10 @@ class Program
     }
 
     // ========================================================================
-    // [기능 3, 4: 퀴즈 시작 및 DB 쿼리]
+    // [퀴즈 시작 및 DB 쿼리]
     // ========================================================================
     /// <summary>
-    /// 새 퀴즈를 시작합니다. (기능 3, 4)
+    /// 새 퀴즈를 시작합니다.
     /// </summary>
     private static async Task StartQuizAsync()
     {
@@ -205,7 +203,7 @@ class Program
 
         await BroadcastMessageAsync("[퀴즈] 포켓몬 퀴즈를 시작합니다!", null);
 
-        // (기능 4) DB에서 랜덤 포켓몬 1마리 가져오기
+        // DB에서 랜덤 포켓몬 1마리 가져오기
         Pokemon? quiz = await GetRandomPokemonFromDbAsync();
 
         if (quiz == null)
@@ -215,14 +213,14 @@ class Program
             return;
         }
 
-        // [핵심] 서버 메모리에 정답과 힌트 목록 저장
+        // 서버 메모리에 정답과 힌트 목록 저장
         currentQuizAnswer = quiz;
-        currentQuizHints = GenerateHintList(quiz); // (기능 6) 힌트 목록 생성
+        currentQuizHints = GenerateHintList(quiz); // 힌트 목록 생성
 
         Console.WriteLine($"[QUIZ] 퀴즈 시작. 정답: {quiz.SpeciesKorName} (ID: {quiz.Id})");
         await BroadcastMessageAsync("[퀴즈] 문제를 가져왔습니다! 15초 후 첫 번째 힌트가 나갑니다.", null);
 
-        // (기능 5) 15초 힌트 타이머 시작
+        // 15초 힌트 타이머 시작
         // (await를 붙이지 않아야 다른 채팅을 계속 처리할 수 있음)
         if (currentQuizHints != null && currentQuizHints.Count > 0)
         {
@@ -230,7 +228,10 @@ class Program
         }
 
         //  15초 힌트 타이머는 '두 번째 힌트부터'(.Skip(1)) 시작
-        _ = StartHintTimerAsync(currentQuizHints.Skip(1), quizTimerCancelToken.Token);
+        if (currentQuizHints != null && quizTimerCancelToken != null)
+        {
+            _ = StartHintTimerAsync(currentQuizHints.Skip(1), quizTimerCancelToken.Token);
+        }
     }
 
     /// <summary>
@@ -244,7 +245,6 @@ class Program
             {
                 await connection.OpenAsync(); // DB 연결
 
-                // [쿼리] 님이 원하셨던 'DB 쿼리 경험'의 핵심입니다.
                 var command = new MySqlCommand("SELECT * FROM Pokemons ORDER BY RAND() LIMIT 1;", connection);
 
                 await using (var reader = await command.ExecuteReaderAsync())
@@ -252,8 +252,6 @@ class Program
                     if (await reader.ReadAsync())
                     {
                         // DB 결과를 Pokemon 객체로 '수동' 매핑
-                        // (MySqlConnector 에는 Dapper 같은 자동 매핑 기능이 없으므로,
-                        //  컬럼 이름을 정확히 알고 있어야 합니다.)
                         return new Pokemon
                         {
                             Id = reader.GetInt32("Id"),
@@ -296,7 +294,7 @@ class Program
 
 
     // ========================================================================
-    // [기능 5, 6: 힌트 생성 및 타이머]
+    // [힌트 생성 및 타이머]
     // ========================================================================
 
     /// <summary>
@@ -311,17 +309,13 @@ class Program
         {
             try
             {
-                // 1. 15초 대기
                 await Task.Delay(TimeSpan.FromSeconds(15), cancelToken);
             }
             catch (TaskCanceledException)
             {
-                // [정답!] 누군가 정답을 맞혀서 타이머가 '취소'됨
                 Console.WriteLine("[INFO] 힌트 타이머가 정상적으로 취소되었습니다.");
                 return;
             }
-
-            // 2. 15초가 지났으므로 다음 힌트 방송 (2~5번 힌트)
             await BroadcastMessageAsync($"[힌트] {hint}", null);
         }
 
@@ -337,7 +331,6 @@ class Program
             return;
         }
 
-        // [수정됨 - 요구사항 3]
         // 15초가 지났는데도 정답자가 없음 (시간 초과)
         await BroadcastMessageAsync($"[시간 초과] 정답은 '{currentQuizAnswer?.SpeciesKorName}'였습니다!", null);
         await StopQuizAsync(); // 퀴즈 자동 종료
@@ -366,7 +359,7 @@ class Program
     }
 
     /// <summary>
-    /// 포켓몬 객체를 받아 5개의 힌트 목록을 생성합니다. (기능 6)
+    /// 포켓몬 객체를 받아 5개의 힌트 목록을 생성합니다.
     /// </summary>
     private static List<string> GenerateHintList(Pokemon quiz)
     {
@@ -399,7 +392,7 @@ class Program
     }
 
     /// <summary>
-    /// (기능 6) 한국어 문자열을 받아 '초성'만 추출합니다. (예: "주리비얀" -> "ㅈㄹㅂㅇ")
+    /// 한국어 문자열을 받아 '초성'만 추출합니다. (예: "주리비얀" -> "ㅈㄹㅂㅇ")
     /// </summary>
     private static string GetChoseong(string koreanText)
     {
@@ -415,10 +408,10 @@ class Program
         StringBuilder sb = new StringBuilder();
         foreach (char c in koreanText)
         {
-            // 1. 문자가 '가' ~ '힣' 범위의 한글인지 확인
+            // 문자가 '가' ~ '힣' 범위의 한글인지 확인
             if (c >= GAH && c <= HEEH)
             {
-                // 2. 유니코드 값을 이용해 초성 인덱스 계산
+                // 유니코드 값을 이용해 초성 인덱스 계산
                 int choseongIndex = (c - GAH) / (21 * 28);
                 sb.Append(choseongList[choseongIndex]);
             }
@@ -451,11 +444,6 @@ class Program
         foreach (var clientEntry in clients)
         {
             TcpClient client = clientEntry.Key;
-
-            // 메시지를 보낸 사람(sender)에게는 다시 보내지 않음 (선택 사항)
-            // (지금은 정답자도 정답 메시지를 봐야 하므로 이 코드는 주석 처리)
-            // if (client == sender) continue;
-
             try
             {
                 NetworkStream stream = client.GetStream();
@@ -467,13 +455,6 @@ class Program
                 disconnectedClients.Add(client);
             }
         }
-
-        // 목록에서 연결 끊긴 클라이언트들 정리 (나중에)
-        // (실제 프로덕션에서는 이 부분을 더 견고하게 처리해야 합니다.)
-        // foreach (var client in disconnectedClients)
-        // {
-        //     clients.TryRemove(client, out _);
-        // }
     }
 
     /// <summary>
@@ -511,21 +492,21 @@ class Program
             {
                 try
                 {
-                    // [Step 1] Users 테이블에 닉네임 삽입 시도
+                    // Users 테이블에 닉네임 삽입 시도
                     // (만약 이미 존재하는 닉네임이면 여기서 예외가 발생하여 catch로 갑니다 -> 로그인 처리)
                     var insertUserCmd = new MySqlCommand("INSERT INTO Users (Nickname) VALUES (@nickname);", connection, transaction);
                     insertUserCmd.Parameters.AddWithValue("@nickname", nickname);
                     await insertUserCmd.ExecuteNonQueryAsync();
 
-                    // [Step 2] 방금 생성된 유저의 ID 가져오기
+                    // 방금 생성된 유저의 ID 가져오기
                     long newUserId = insertUserCmd.LastInsertedId;
 
-                    // [Step 3] Scoreboard 테이블 초기화 (0승 0패)
+                    // Scoreboard 테이블 초기화 (0승 0패)
                     var insertScoreCmd = new MySqlCommand("INSERT INTO Scoreboard (UserId, Wins, Losses) VALUES (@userId, 0, 0);", connection, transaction);
                     insertScoreCmd.Parameters.AddWithValue("@userId", newUserId);
                     await insertScoreCmd.ExecuteNonQueryAsync();
 
-                    // [Step 4] 모든 작업 성공! 커밋(Commit)하여 진짜로 저장합니다.
+                    // 모든 작업 성공! 커밋(Commit)하여 진짜로 저장합니다.
                     await transaction.CommitAsync();
                     Console.WriteLine($"[DB] 신규 유저 '{nickname}' 등록 완료 (트랜잭션 성공)");
                     return true; // 신규 등록 성공
@@ -553,48 +534,124 @@ class Program
     }
 
     // ========================================================================
-    // [접속자 수 & 점수 전송]
+    // [접속자 목록 & 점수 방송]
     // ========================================================================
 
     /// <summary>
-    /// 모든 유저에게 '현재 접속자 수'를 방송합니다. (태그: [USER_COUNT])
+    /// 모든 유저에게 '현재 접속자 수'를 "N/M" 형식으로 방송합니다.
     /// </summary>
     private static async Task BroadcastUserCountAsync()
     {
         int count = clients.Count;
-        // 예: "[USER_COUNT] 5"
-        await BroadcastMessageAsync($"[USER_COUNT] {count}", null);
+        await BroadcastMessageAsync($"[USER_COUNT] [ {count}/{MaxPlayers} ]", null);
     }
 
     /// <summary>
-    /// 특정 유저에게 '자신의 승리 횟수(점수)'를 DB에서 조회하여 보냅니다. (태그: [MY_SCORE])
+    /// 모든 유저에게 '접속자 명단'과 '승수'를 방송합니다.
+    /// 형식: [USER_LIST] 닉네임1:승수,닉네임2:승수,...
     /// </summary>
-    private static async Task SendMyScoreAsync(TcpClient client, string nickname)
+    private static async Task BroadcastUserListAsync()
     {
         try
         {
+            // 현재 접속 중인 모든 닉네임 수집
+            var activeNicknames = clients.Values.ToList();
+            if (activeNicknames.Count == 0)
+            {
+                await BroadcastMessageAsync("[USER_LIST] ", null);
+                return;
+            }
+
+            // DB에서 접속 중인 유저들의 점수(Wins) 조회
+            var userListString = new StringBuilder();
+
             using (var connection = new MySqlConnection(DbConnectionString))
             {
                 await connection.OpenAsync();
-                // Users 테이블과 조인하여 해당 닉네임의 Wins(승리 수)를 가져옴
-                string sql = @"
-                    SELECT s.Wins FROM Scoreboard s
+
+                // IN (...) 쿼리를 만들기 위해 파라미터 동적 생성
+                // 예: SELECT u.Nickname, s.Wins FROM ... WHERE u.Nickname IN ('User1', 'User2')
+                var parameters = new List<string>();
+                for (int i = 0; i < activeNicknames.Count; i++)
+                {
+                    parameters.Add($"@nick{i}");
+                }
+
+                string inClause = string.Join(",", parameters);
+                string sql = $@"
+                    SELECT u.Nickname, s.Wins 
+                    FROM Scoreboard s
                     JOIN Users u ON s.UserId = u.Id
-                    WHERE u.Nickname = @nickname;";
+                    WHERE u.Nickname IN ({inClause});";
 
                 var cmd = new MySqlCommand(sql, connection);
-                cmd.Parameters.AddWithValue("@nickname", nickname);
+                for (int i = 0; i < activeNicknames.Count; i++)
+                {
+                    cmd.Parameters.AddWithValue($"@nick{i}", activeNicknames[i]);
+                }
 
-                object? result = await cmd.ExecuteScalarAsync();
-                int wins = result != null ? Convert.ToInt32(result) : 0;
-
-                // 예: "[MY_SCORE] 10"
-                await SendMessageToClientAsync(client, $"[MY_SCORE] {wins}");
+                // 결과 읽어서 문자열 조합 ("닉네임:점수,")
+                using (var reader = await cmd.ExecuteReaderAsync())
+                {
+                    while (await reader.ReadAsync())
+                    {
+                        string nick = reader.GetString("Nickname");
+                        int wins = reader.GetInt32("Wins");
+                        userListString.Append($"{nick}:{wins},");
+                    }
+                }
             }
+
+            // 마지막 쉼표 제거 및 방송
+            string finalData = userListString.ToString().TrimEnd(',');
+            // 예: "[USER_LIST] 유니티테스터:3,친구1:0"
+            await BroadcastMessageAsync($"[USER_LIST] {finalData}", null);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[DB 오류] 점수 조회 실패({nickname}): {ex.Message}");
+            Console.WriteLine($"[DB 오류] 유저 목록 조회 실패: {ex.Message}");
+        }
+    }
+
+    // ========================================================================
+    // [점수 업데이트 트랜잭션]
+    // ========================================================================
+
+    /// <summary>
+    /// 퀴즈가 끝났을 때 '승자'의 점수만 트랜잭션으로 안전하게 업데이트합니다.
+    /// </summary>
+    private static async Task UpdateGameResultAsync(string winnerNickname)
+    {
+        using (var connection = new MySqlConnection(DbConnectionString))
+        {
+            await connection.OpenAsync();
+
+            // 트랜잭션 시작
+            using (var transaction = await connection.BeginTransactionAsync())
+            {
+                try
+                {
+                    // 승자 점수 업데이트 (Wins + 1)
+                    string updateWinnerSql = @"
+                        UPDATE Scoreboard s 
+                        JOIN Users u ON s.UserId = u.Id 
+                        SET s.Wins = s.Wins + 1 
+                        WHERE u.Nickname = @winnerName;";
+
+                    var winnerCmd = new MySqlCommand(updateWinnerSql, connection, transaction);
+                    winnerCmd.Parameters.AddWithValue("@winnerName", winnerNickname);
+                    await winnerCmd.ExecuteNonQueryAsync();
+
+                    // 모두 성공하면 커밋
+                    await transaction.CommitAsync();
+                    Console.WriteLine($"[DB] 점수 업데이트 완료 (승자: {winnerNickname})");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[DB 오류] 점수 갱신 실패, 롤백합니다: {ex.Message}");
+                    await transaction.RollbackAsync();
+                }
+            }
         }
     }
 }

@@ -3,44 +3,66 @@ using TMPro;
 using System.Collections.Generic;
 
 /// <summary>
-/// [옵저버] 우측 하단 '접속자 수'와 '내 점수' UI를 관리합니다.
+/// [옵저버] 접속자 명단과 점수를 표시하는 UI (Scroll View)
 /// </summary>
 public class UserListUI : MonoBehaviour
 {
-    [Header("UI 연결")]
-    [Tooltip("접속자 수를 표시할 텍스트 (예: Online: 5)")]
+    [Header("접속자 수 (2/6)")]
+    [Tooltip("접속자 수를 표시할 텍스트 (예: 2/6)")]
     [SerializeField] private TMP_Text userCountText;
-    [SerializeField] private List<TMP_Text> userCountText;
 
-    [Tooltip("내 점수를 표시할 텍스트 (예: Score: 10)")]
-    [SerializeField] private TMP_Text myScoreText;
+    [Header("유저 슬롯 목록")]
+    [Tooltip("유저 정보가 표시될 6개의 Text (TMP) 슬롯 리스트")]
+    [SerializeField] private List<TMP_Text> userListSlots = new List<TMP_Text>();
 
     private void OnEnable()
     {
-        // NetworkManager 이벤트 구독
-        NetworkManager.OnUserCountReceived += UpdateUserCount;
-        NetworkManager.OnMyScoreReceived += UpdateMyScore;
+        // 2개의 분리된 이벤트 구독
+        NetworkManager.OnUserCountUpdated += UpdateUserCount;
+        NetworkManager.OnUserListReceived += UpdateUserList;
     }
 
     private void OnDisable()
     {
-        NetworkManager.OnUserCountReceived -= UpdateUserCount;
-        NetworkManager.OnMyScoreReceived -= UpdateMyScore;
+        NetworkManager.OnUserCountUpdated -= UpdateUserCount;
+        NetworkManager.OnUserListReceived -= UpdateUserList;
     }
 
-    private void UpdateUserCount(int count)
+    /// <summary>
+    /// (요구사항 1) 접속자 수 텍스트 갱신 (예: "2/6")
+    /// </summary>
+    private void UpdateUserCount(string countText)
     {
         if (userCountText != null)
         {
-            userCountText.text = $"접속자: {count}명";
+            userCountText.text = countText;
         }
     }
 
-    private void UpdateMyScore(int score)
+    /// <summary>
+    /// (요구사항 2) 6개의 슬롯에 유저 목록 갱신 (예: "유저1 [2/0]")
+    /// </summary>
+    private void UpdateUserList(List<UserData> users)
     {
-        if (myScoreText != null)
+        // 6개의 슬롯을 순회
+        for (int i = 0; i < userListSlots.Count; i++)
         {
-            myScoreText.text = $"내 점수: {score}승";
+            if (userListSlots[i] == null) continue; // 슬롯이 비었으면 건너뛰기
+
+            // 이 슬롯(i)에 해당하는 유저가 '있는지' 확인
+            if (i < users.Count)
+            {
+                // [데이터 있음] 텍스트 채우기 
+                UserData user = users[i];
+                userListSlots[i].text = $"{user.Nickname} [{user.Score}]";
+                userListSlots[i].gameObject.SetActive(true); // 슬롯 활성화
+            }
+            else
+            {
+                // [데이터 없음] 빈 슬롯 처리
+                userListSlots[i].text = ""; // 텍스트 비우기
+                userListSlots[i].gameObject.SetActive(false); // 슬롯 비활성화
+            }
         }
     }
 }

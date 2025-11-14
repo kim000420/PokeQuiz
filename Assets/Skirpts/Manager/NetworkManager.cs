@@ -7,6 +7,13 @@ using System.Threading.Tasks;
 using UnityEngine;
 using System.Collections.Concurrent;
 
+// 유저 목록 데이터를 전달하기 위한 간단한 클래스
+public class UserData
+{
+    public string Nickname;
+    public int Score;
+}
+
 /// <summary>
 /// [싱글톤] VM 서버와의 모든 TCP 통신을 전담하는 '주체(Subject)'입니다.
 /// 이 스크립트는 UI를 전혀 모르며, 오직 '신호(Event)'만 보냅니다.
@@ -41,9 +48,11 @@ public class NetworkManager : MonoBehaviour
     public static event Action<string> OnMessageReceived;
     //서버 연결 상태가 변경될 때 발생하는 이벤트입니다.
     public static event Action<bool> OnConnectionStateChanged;
-    // 접속자 수 변경 이벤트 (int)
-    public static event Action<int> OnUserCountReceived;
-    // 내 점수 갱신 이벤트 (int)
+    // 유저 목록 변경 이벤트
+    public static event Action<System.Collections.Generic.List<UserData>> OnUserListReceived;
+    // 유저수  갱신 이벤트
+    public static event Action<string> OnUserCountUpdated;
+    // 내 점수 갱신 이벤트
     public static event Action<int> OnMyScoreReceived;
 
 
@@ -141,32 +150,65 @@ public class NetworkManager : MonoBehaviour
 
                 string message = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
 
-                // 태그 파싱 로직
+                // '범용' 이벤트(OnMessageReceived)로 가기 전에,
+                // '특수 태그'들을 먼저 모두 필터링합니다.
+
                 if (message.StartsWith("[USER_COUNT]"))
                 {
-                    // 예: "[USER_COUNT] 5" -> "5" 파싱
+                    // 예: "[USER_COUNT] 2/6" -> "2/6"
                     string countStr = message.Substring("[USER_COUNT]".Length).Trim();
-                    if (int.TryParse(countStr, out int count))
-                    {
-                        MainThreadDispatcher.ExecuteOnMainThread(() => OnUserCountReceived?.Invoke(count));
-                    }
-                    continue; // 채팅 로그에는 표시 안 함
-                }
-                else if (message.StartsWith("[MY_SCORE]"))
-                {
-                    // 예: "[MY_SCORE] 10" -> "10" 파싱
-                    string scoreStr = message.Substring("[MY_SCORE]".Length).Trim();
-                    if (int.TryParse(scoreStr, out int score))
-                    {
-                        MainThreadDispatcher.ExecuteOnMainThread(() => OnMyScoreReceived?.Invoke(score));
-                    }
+                    MainThreadDispatcher.ExecuteOnMainThread(() => OnUserCountUpdated?.Invoke(countStr));
                     continue; // 채팅 로그에는 표시 안 함
                 }
 
-                // 메시지를 UI로 직접 보내지 않고, '메인 스레드'에서 '이벤트'를 방송(Invoke)합니다.
-                MainThreadDispatcher.ExecuteOnMainThread(() =>
-                    OnMessageReceived?.Invoke(message)
-                );
+                if (message.StartsWith("[USER_LIST]"))
+                {
+                    // 예: "[USER_LIST] A:3,B:0"
+                    string dataStr = message.Substring("[USER_LIST]".Length).Trim();
+                    var userList = new System.Collections.Generic.List<UserData>();
+
+                    if (!string.IsNullOrEmpty(dataStr))
+                    {
+                        string[] users = dataStr.Split(',');
+                        foreach (var userStr in users)
+                        {
+                            // [수정됨] "닉:승" (2개) 파싱
+                            string[] parts = userStr.Split(':');
+                            if (parts.Length == 2 && int.TryParse(parts[1], out int score))
+                            {
+                                userList.Add(new UserData { Nickname = parts[0], Score = score });
+                            }
+                        }
+                    }
+                    MainThreadDispatcher.ExecuteOnMainThread(() => OnUserListReceived?.Invoke(userList));
+                    continue; // 처리 완료. 범용 이벤트로 보내지 않음.
+                }
+
+                // 퀴즈/서버 메시지도 '범용' 이벤트로 보내지 않습니다.
+                // (ChatUI가 아닌 PopupManager가 처리해야 함)
+                if (message.StartsWith("[퀴즈]") ||
+                    message.StartsWith("[힌트]") ||
+                    message.StartsWith("[정답!]") ||
+                    message.StartsWith("[시간 초과]") ||
+                    message.StartsWith("[서버]") ||
+                    message.StartsWith("[오류]"))
+                {
+                    // (PopupManager와 ChatUI의 HandleServerMessage가 이 메시지들을 받을 것임)
+                }
+
+                // '모든' 메시지를 범용 이벤트로 보내는 대신,
+                // '필터링되고 남은' 메시지(즉, 진짜 유저 채팅)만 보냅니다.
+                if (message.StartsWith("["))
+                {
+                    // (이 코드는 ChatUI가 구독 중)
+                    MainThreadDispatcher.ExecuteOnMainThread(() =>
+                        OnMessageReceived?.Invoke(message)
+                    );
+                }
+                else
+                {
+                    Debug.LogWarning($"[NetworkManager] 태그가 없는 메시지 수신: {message}");
+                }
             }
         }
         catch (Exception e)

@@ -77,6 +77,26 @@ public class ChatUI : MonoBehaviour
             // (여기서는 채팅창에만 추가)
         }
 
+        Color messageColor = Color.white;
+        bool isChatMessage = false;
+
+        if (message.StartsWith("[서버]"))
+        {
+            messageColor = Color.green;
+            isChatMessage = true;
+        }
+        else if (message.StartsWith("[")) // [닉네임]...
+        {
+            isChatMessage = true;
+        }
+
+        // [퀴즈], [힌트], [정답!], [시간 초과], [오류] 메시지는 모두 '무시'합니다.
+        // (NetworkManager 1차 필터 + ChatUI 2차 필터)
+        if (isChatMessage)
+        {
+            AddMessageToChatLog(message, messageColor);
+        }
+
         // [수정됨]
         // 힌트가 아닌 모든 메시지(시스템, 채팅, 정답, 시간 초과 등)는 로그에 추가합니다.
         // (색상 구분을 위한 간단한 로직 추가)
