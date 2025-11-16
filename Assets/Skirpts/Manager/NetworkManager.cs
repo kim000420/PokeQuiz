@@ -40,7 +40,6 @@ public class NetworkManager : MonoBehaviour
         }
     }
 
-    // --- 2. 옵저버 패턴 (이벤트) ---
     /// <summary>
     /// [핵심] 서버에서 메시지(채팅, 힌트, 정답)가 수신될 때마다 발생하는 이벤트입니다.
     /// UI(옵저버)들이 이 이벤트를 '구독'합니다.
@@ -172,7 +171,7 @@ public class NetworkManager : MonoBehaviour
                         string[] users = dataStr.Split(',');
                         foreach (var userStr in users)
                         {
-                            // [수정됨] "닉:승" (2개) 파싱
+                            // "닉:승" (2개) 파싱
                             string[] parts = userStr.Split(':');
                             if (parts.Length == 2 && int.TryParse(parts[1], out int score))
                             {
@@ -184,29 +183,20 @@ public class NetworkManager : MonoBehaviour
                     continue; // 처리 완료. 범용 이벤트로 보내지 않음.
                 }
 
-                // 퀴즈/서버 메시지도 '범용' 이벤트로 보내지 않습니다.
-                // (ChatUI가 아닌 PopupManager가 처리해야 함)
-                if (message.StartsWith("[퀴즈]") ||
-                    message.StartsWith("[힌트]") ||
-                    message.StartsWith("[정답!]") ||
-                    message.StartsWith("[시간 초과]") ||
-                    message.StartsWith("[서버]") ||
-                    message.StartsWith("[오류]"))
+                // 퀴즈/시스템 관련 메시지(PopupManager, ChatUI가 구독)와
+                // 진짜 유저 채팅('[닉네임]...')을 구분합니다.
+                if (message.StartsWith("[") && message.Contains("]"))
                 {
-                    // (PopupManager와 ChatUI의 HandleServerMessage가 이 메시지들을 받을 것임)
-                }
-
-                // '모든' 메시지를 범용 이벤트로 보내는 대신,
-                // '필터링되고 남은' 메시지(즉, 진짜 유저 채팅)만 보냅니다.
-                if (message.StartsWith("["))
-                {
-                    // (이 코드는 ChatUI가 구독 중)
+                    // [퀴즈], [힌트], [정답!], [서버], [오류], [시간 초과], [닉네임]...
+                    // 이 모든 메시지는 '범용' 이벤트로 보냅니다.
+                    // (ChatUI와 PopupManager가 알아서 필터링할 것입니다)
                     MainThreadDispatcher.ExecuteOnMainThread(() =>
                         OnMessageReceived?.Invoke(message)
                     );
                 }
                 else
                 {
+                    // (태그가 없는 비정상 메시지)
                     Debug.LogWarning($"[NetworkManager] 태그가 없는 메시지 수신: {message}");
                 }
             }

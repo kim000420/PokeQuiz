@@ -12,7 +12,7 @@ using System.Collections.Generic; // 채팅 로그 관리를 위해
 public class ChatUI : MonoBehaviour
 {
     [Header("UI 컴포넌트 연결")]
-    [Tooltip("님이 11-A 단계에서 만든 '채팅 한 줄' 프리팹")]
+    [Tooltip("채팅 프리팹")]
     [SerializeField] private GameObject chatMessagePrefab;
 
     [Tooltip("채팅 프리팹이 생성될 Scroll View의 'Content' 오브젝트")]
@@ -31,8 +31,6 @@ public class ChatUI : MonoBehaviour
     [SerializeField] private TMP_Text statusText;
 
     private List<GameObject> chatLog = new List<GameObject>(); // 생성된 메시지 관리
-
-    // --- 1. 옵저버 패턴 (이벤트 구독) ---
 
     private void OnEnable()
     {
@@ -55,13 +53,14 @@ public class ChatUI : MonoBehaviour
         chatInputField.onSubmit.RemoveListener(OnInputFieldSubmit);
     }
 
-    // --- 2. 이벤트 핸들러 (신호 수신) ---
-
     /// <summary>
     /// NetworkManager로부터 '메시지 수신' 신호를 받았을 때 호출됩니다.
     /// </summary>
     private void HandleServerMessage(string message)
     {
+        Color messageColor = Color.white;
+        bool isChatMessage = false;
+
         // 퀴즈 시작/힌트 관련 메시지는 PopupManager가 전담하므로,
         // 채팅 로그에서는 이 메시지들을 '무시(return)'합니다.
         if (message.StartsWith("[퀴즈] 새 퀴즈를") ||
@@ -70,17 +69,14 @@ public class ChatUI : MonoBehaviour
         {
             return; // 채팅 로그에 추가하지 않고 무시
         }
-        // 채팅 로그에도 표시되어야 하므로 '무시'하지 않습니다.
-        if (message.StartsWith("[정답!]"))
+
+        // 힌트가 아닌 모든 메시지(시스템, 채팅, 정답, 시간 초과 등)는 로그에 추가합니다.
+        if (message.StartsWith("[정답!]") || message.StartsWith("[시간 초과]"))
         {
-            // PopupManager가 이 메시지를 별도로 처리할 것입니다.
-            // (여기서는 채팅창에만 추가)
+            messageColor = Color.yellow;
+            isChatMessage = true;
         }
-
-        Color messageColor = Color.white;
-        bool isChatMessage = false;
-
-        if (message.StartsWith("[서버]"))
+        else if (message.StartsWith("[시스템]") || message.StartsWith("[서버]"))
         {
             messageColor = Color.green;
             isChatMessage = true;
@@ -90,27 +86,9 @@ public class ChatUI : MonoBehaviour
             isChatMessage = true;
         }
 
-        // [퀴즈], [힌트], [정답!], [시간 초과], [오류] 메시지는 모두 '무시'합니다.
-        // (NetworkManager 1차 필터 + ChatUI 2차 필터)
         if (isChatMessage)
         {
             AddMessageToChatLog(message, messageColor);
-        }
-
-        // [수정됨]
-        // 힌트가 아닌 모든 메시지(시스템, 채팅, 정답, 시간 초과 등)는 로그에 추가합니다.
-        // (색상 구분을 위한 간단한 로직 추가)
-        if (message.StartsWith("[시스템]") || message.StartsWith("[서버]"))
-        {
-            AddMessageToChatLog(message, Color.green);
-        }
-        else if (message.StartsWith("[정답!]") || message.StartsWith("[시간 초과]"))
-        {
-            AddMessageToChatLog(message, Color.yellow);
-        }
-        else
-        {
-            AddMessageToChatLog(message, Color.white);
         }
     }
 
