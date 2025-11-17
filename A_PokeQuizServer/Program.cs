@@ -381,8 +381,28 @@ class Program
         }
 
         // 15초가 지났는데도 정답자가 없음 (시간 초과)
-        string timeOutMsg = $"[시간 초과] 정답은 '{currentQuizAnswer?.SpeciesKorName}'였습니다!";
-        await StopQuizAsync(timeOutMsg);
+        // "CPU"가 이긴 것으로 간주하고 WinnerPacket 방송
+        var cpuWinnerPkt = new WinnerPacket
+        {
+            type = "WINNER",
+            winnerName = "CPU",        // 또는 "시스템", "시간초과" 등 원하는 이름
+            answerPokemon = currentQuizAnswer!.SpeciesKorName,
+            newScore = 0               // CPU 점수는 표시 안 하거나 0으로 처리
+        };
+        await BroadcastJsonAsync(cpuWinnerPkt, null);
+
+        // 채팅창에도 시간 초과 알림 전송
+        var timeoutChatPkt = new ChatPacket
+        {
+            type = "CHAT",
+            message = $"[시스템] 시간 초과! 정답은 '{currentQuizAnswer.SpeciesKorName}'였습니다.",
+            colorHex = "#FF0000" // 빨간색
+        };
+        await BroadcastJsonAsync(timeoutChatPkt, null);
+
+        // 퀴즈 종료 처리
+        // (이미 정답 공개를 했으므로 reasonMessage는 null로 보냄)
+        await StopQuizAsync(null);
     }
 
     /// <summary>
