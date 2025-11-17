@@ -4,9 +4,10 @@ using UnityEngine;
 using TMPro; // TextMeshPro (TMP) UI를 사용하기 위해
 using UnityEngine.UI; // Button, ScrollRect
 using SharedPackets; // 패킷 사용
+using DG.Tweening;
 
 /// <summary>
-/// [옵저버] '2. Main Chat UI'를 관리합니다.
+/// Main Chat UI 관리
 /// NetworkManager의 이벤트를 '구독'하여 채팅 로그, 입력창 등을 제어합니다.
 /// </summary>
 public class ChatUI : MonoBehaviour
@@ -29,6 +30,13 @@ public class ChatUI : MonoBehaviour
 
     [Tooltip("(선택) 서버 연결 상태를 표시할 텍스트")]
     [SerializeField] private TMP_Text statusText;
+
+    [Header("Animation Settings")]
+    [Tooltip("메시지가 튀어나오는 시간 (초)")]
+    [SerializeField] private float msgAnimDuration = 0.3f;
+
+    [Tooltip("메시지 등장 효과 타입 (OutBack 추천)")]
+    [SerializeField] private Ease msgAnimEase = Ease.OutBack;
 
     private void OnEnable()
     {
@@ -137,9 +145,13 @@ public class ChatUI : MonoBehaviour
     /// </summary>
     private void AddMessageToChatLog(string message, Color color)
     {
-        if (chatMessagePrefab == null) return;
+        if (chatMessagePrefab == null || chatContentTransform == null) return;
 
         GameObject newMsg = Instantiate(chatMessagePrefab, chatContentTransform);
+
+        newMsg.transform.localScale = Vector3.zero;
+
+        newMsg.transform.DOScale(1f, msgAnimDuration).SetEase(msgAnimEase);
 
         TMP_Text tmpText = newMsg.GetComponent<TMP_Text>();
         if (tmpText != null)
@@ -149,7 +161,18 @@ public class ChatUI : MonoBehaviour
         }
 
         // 자동 스크롤
-        Canvas.ForceUpdateCanvases();
-        chatScrollRect.verticalNormalizedPosition = 0f;
+        StartCoroutine(ScrollToBottom());
+    }
+    private System.Collections.IEnumerator ScrollToBottom()
+    {
+        // 레이아웃이 갱신될 때까지 한 프레임 대기
+        yield return null;
+
+        if (chatScrollRect != null)
+        {
+            // 스크롤을 맨 아래(0)로 이동
+            // 애니메이션 때문에 사이즈가 변해도 LayoutGroup이 알아서 자리를 잡습니다.
+            chatScrollRect.verticalNormalizedPosition = 0f;
+        }
     }
 }
