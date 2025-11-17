@@ -3631,6 +3631,8 @@ MonoBehaviour:
   winnerAnswerText: {fileID: 1494864191}
   winnerDisplayDuration: 3
   animationDuration: 0.5
+  hintAnimDuration: 0.3
+  hintAnimEase: 27
 --- !u!114 &725583797
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -7954,7 +7956,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &1754474089
 RectTransform:
   m_ObjectHideFlags: 0
@@ -8265,6 +8267,8 @@ MonoBehaviour:
   sendButton: {fileID: 579874747}
   chatScrollRect: {fileID: 935918117}
   statusText: {fileID: 0}
+  msgAnimDuration: 0.3
+  msgAnimEase: 27
 --- !u!1 &1803656054
 GameObject:
   m_ObjectHideFlags: 0
@@ -8923,7 +8927,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 0
+  m_IsActive: 1
 --- !u!224 &2076690157
 RectTransform:
   m_ObjectHideFlags: 0

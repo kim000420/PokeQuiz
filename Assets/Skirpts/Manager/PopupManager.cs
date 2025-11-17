@@ -186,7 +186,6 @@ public class PopupManager : MonoBehaviour
 
         if (winnerPopupObject != null)
         {
-            // [DOTween] ∆Æ¿©µµ ¡ÔΩ√ ∏ÿ√„
             winnerPopupObject.transform.DOKill();
             winnerPopupObject.SetActive(false);
         }
