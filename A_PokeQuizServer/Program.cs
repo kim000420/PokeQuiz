@@ -76,28 +76,62 @@ class Program
 
         try
         {
-            // 닉네임 로그인: 클라이언트의 '첫 번째' 메시지를 닉네임으로 간주
+            // JSON 로그인 패킷 수신 대기
             int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-            if (bytesRead == 0) return; // 연결 직후 끊김
+            if (bytesRead == 0) return; // 연결 끊김
 
-            nickname = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+            string loginJson = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+            LoginRequestPacket? loginReq = null;
 
-            // 닉네임이 유효한지 간단히 확인
-            if (string.IsNullOrEmpty(nickname) || nickname.Length > 12)
+            try
             {
-                nickname = $"User{Random.Shared.Next(100, 999)}";
+                // JSON 파싱 시도
+                var tempObj = JsonConvert.DeserializeObject<SharedPackets.BasePacket>(loginJson);
+                if (tempObj != null && tempObj.type == "LOGIN_REQ")
+                {
+                    loginReq = JsonConvert.DeserializeObject<LoginRequestPacket>(loginJson);
+                }
+            }
+            catch
+            {
+                Console.WriteLine($"[WARN] 잘못된 로그인 패킷 형식: {loginJson}");
             }
 
-            // DB 트랜잭션을 통한 회원가입/로그인 시도
+            // 패킷 유효성 검사
+            if (loginReq == null || string.IsNullOrEmpty(loginReq.nickname))
+            {
+                var failPkt = new LoginResponsePacket { type = "LOGIN_RES", success = false, message = "잘못된 요청입니다." };
+                await SendJsonToClientAsync(client, failPkt);
+                client.Close();
+                return;
+            }
+
+            nickname = loginReq.nickname;
+
+            // 닉네임 길이 등 2차 검증 (서버 측)
+            if (nickname.Length > 6) // 한글 6글자 초과 등
+            {
+                var failPkt = new LoginResponsePacket { type = "LOGIN_RES", success = false, message = "닉네임이 너무 깁니다." };
+                await SendJsonToClientAsync(client, failPkt);
+                client.Close();
+                return;
+            }
+
+            // DB 트랜잭션 (로그인/회원가입)
             bool isLoginSuccess = await RegisterOrLoginUserAsync(nickname);
+
             if (!isLoginSuccess)
             {
-                // JSON으로 귓속말 전송
-                var errorPkt = new ChatPacket { type = "CHAT", message = "[오류] 서버 DB 문제로 접속할 수 없습니다.", colorHex = "#FF0000" };
+                // DB 오류로 실패
+                var errorPkt = new LoginResponsePacket { type = "LOGIN_RES", success = false, message = "서버 DB 오류 발생." };
                 await SendJsonToClientAsync(client, errorPkt);
                 client.Close();
                 return;
             }
+
+            // 로그인 응답 전송
+            var successPkt = new LoginResponsePacket { type = "LOGIN_RES", success = true, message = "로그인 성공" };
+            await SendJsonToClientAsync(client, successPkt);
 
             // 클라이언트 목록에 정식 등록
             clients.TryAdd(client, nickname);
@@ -108,7 +142,7 @@ class Program
             await BroadcastUserListAsync();
 
             // 환영 메시지 (JSON 귓속말)
-            var welcomePkt = new ChatPacket { type = "CHAT", message = $"[서버] '{nickname}'님, 환영합니다. '/퀴즈시작'을 입력하세요.", colorHex = "#00FF00" };
+            var welcomePkt = new ChatPacket { type = "CHAT", message = $"[서버] '{nickname}'님, 환영합니다.", colorHex = "#00FF00" };
             await SendJsonToClientAsync(client, welcomePkt);
 
             // 입장 알림 (JSON 방송)

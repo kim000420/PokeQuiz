@@ -54,15 +54,16 @@ public class NetworkManager : MonoBehaviour
     public static event Action<QuizStartPacket> OnQuizStarted;
     public static event Action<HintPacket> OnHintReceived;
     public static event Action<WinnerPacket> OnWinnerReceived;
-    public static event Action<QuizEndPacket> OnQuizEnded;
+    public static event Action<QuizEndPacket> OnQuizEnded; 
+    public static event Action<LoginResponsePacket> OnLoginResultReceived;
 
 
     [Header("서버 정보")]
-    [SerializeField] private string serverIP = "34.22.102.159"; // [중요] 님의 VM 공용 IP
-    [SerializeField] private int serverPort = 7777; // [중요] 님의 서버 포트
-
-    [Header("로그인 (기능 1)")]
-    [SerializeField] private string nickname = "유니티테스터"; // [중요] 서버로 보낼 닉네임
+    [SerializeField] private string serverIP = "34.22.102.159"; // VM 공용 IP
+    [SerializeField] private int serverPort = 7777; // 서버 포트
+    
+    private string nickname; // 서버로 보낼 닉네임
+    public string MyNickname => nickname;
 
     private TcpClient _client;
     private NetworkStream _stream;
@@ -76,10 +77,7 @@ public class NetworkManager : MonoBehaviour
         DontDestroyOnLoad(this.gameObject);
     }
 
-    private async void Start()
-    {
-        await ConnectToServerAsync();
-    }
+    private async void Start() { }
 
     private void OnDestroy()
     {
@@ -90,9 +88,11 @@ public class NetworkManager : MonoBehaviour
     /// <summary>
     /// 서버에 접속하고 닉네임을 전송합니다.
     /// </summary>
-    private async Task ConnectToServerAsync()
+    public async Task ConnectAndLoginAsync(string inputNickname)
     {
         if (_isConnected) return;
+
+        this.nickname = inputNickname; // 입력받은 닉네임 저장
 
         try
         {
@@ -107,7 +107,13 @@ public class NetworkManager : MonoBehaviour
             );
 
             // 접속 직후, 닉네임을 서버로 전송
-            await SendMessageToServerAsync(nickname);
+            var loginPkt = new LoginRequestPacket
+            {
+                type = "LOGIN_REQ",
+                nickname = this.nickname
+            };
+            string json = JsonConvert.SerializeObject(loginPkt);
+            await SendMessageToServerAsync(json);
 
             // 서버로부터 메시지를 계속 수신하는 루프 시작
             _ = ReceiveMessagesAsync();
@@ -115,9 +121,13 @@ public class NetworkManager : MonoBehaviour
         catch (Exception e)
         {
             Debug.LogError($"[NetworkManager] 서버 접속 실패: {e.Message}");
+            _isConnected = false;
             MainThreadDispatcher.ExecuteOnMainThread(() =>
-                OnConnectionStateChanged?.Invoke(false)
-            );
+            {
+                OnConnectionStateChanged?.Invoke(false);
+                // 로그인 실패 이벤트 발생 (UI에 알림)
+                OnLoginResultReceived?.Invoke(new LoginResponsePacket { success = false, message = "서버 연결 실패" });
+            });
         }
     }
 
@@ -167,13 +177,13 @@ public class NetworkManager : MonoBehaviour
     {
         try
         {
-            // 1. Type 확인
+            // Type 확인
             JObject jsonObj = JObject.Parse(jsonMessage);
             string messageType = jsonObj["type"]?.ToString();
 
             if (string.IsNullOrEmpty(messageType)) return;
 
-            // 2. 메인 스레드에서 이벤트 발생
+            // 메인 스레드에서 이벤트 발생
             MainThreadDispatcher.ExecuteOnMainThread(() =>
             {
                 try
@@ -200,6 +210,9 @@ public class NetworkManager : MonoBehaviour
                             break;
                         case "QUIZ_END":
                             OnQuizEnded?.Invoke(jsonObj.ToObject<QuizEndPacket>());
+                            break;
+                        case "LOGIN_RES":
+                            OnLoginResultReceived?.Invoke(jsonObj.ToObject<LoginResponsePacket>());
                             break;
                     }
                 }

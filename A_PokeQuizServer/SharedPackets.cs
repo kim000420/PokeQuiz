@@ -69,4 +69,17 @@ namespace SharedPackets
     {
         public string reasonMessage; // "[시간 초과] 정답은..."
     }
+
+    // 클라 -> 서버: 로그인 요청
+    public class LoginRequestPacket : BasePacket
+    {
+        public string nickname;
+    }
+
+    // 서버 -> 클라: 로그인 결과 응답
+    public class LoginResponsePacket : BasePacket
+    {
+        public bool success;   // 성공 여부
+        public string message; // 실패 사유 또는 환영 메시지
+    }
 }
