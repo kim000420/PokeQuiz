@@ -5,8 +5,9 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
-using System.Collections.Concurrent;
-
+using SharedPackets;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq; 
 // 유저 목록 데이터를 전달하기 위한 간단한 클래스
 public class UserData
 {
@@ -41,18 +42,19 @@ public class NetworkManager : MonoBehaviour
     }
 
     /// <summary>
-    /// [핵심] 서버에서 메시지(채팅, 힌트, 정답)가 수신될 때마다 발생하는 이벤트입니다.
+    /// 서버에서 메시지(채팅, 힌트, 정답)가 수신될 때마다 발생하는 이벤트입니다.
     /// UI(옵저버)들이 이 이벤트를 '구독'합니다.
     /// </summary>
-    public static event Action<string> OnMessageReceived;
-    //서버 연결 상태가 변경될 때 발생하는 이벤트입니다.
     public static event Action<bool> OnConnectionStateChanged;
-    // 유저 목록 변경 이벤트
-    public static event Action<System.Collections.Generic.List<UserData>> OnUserListReceived;
-    // 유저수  갱신 이벤트
-    public static event Action<string> OnUserCountUpdated;
-    // 내 점수 갱신 이벤트
-    public static event Action<int> OnMyScoreReceived;
+
+    // UI별로 필요한 패킷만 전달하는 명확한 이벤트들
+    public static event Action<ChatPacket> OnChatMessageReceived;
+    public static event Action<UserCountPacket> OnUserCountUpdated;
+    public static event Action<UserListPacket> OnUserListReceived;
+    public static event Action<QuizStartPacket> OnQuizStarted;
+    public static event Action<HintPacket> OnHintReceived;
+    public static event Action<WinnerPacket> OnWinnerReceived;
+    public static event Action<QuizEndPacket> OnQuizEnded;
 
 
     [Header("서버 정보")]
@@ -69,28 +71,20 @@ public class NetworkManager : MonoBehaviour
     // --- Unity 생명주기 ---
     private void Awake()
     {
-        // 싱글톤 인스턴스 관리
-        if (_instance != null && _instance != this)
-        {
-            Destroy(this.gameObject);
-            return;
-        }
+        if (_instance != null && _instance != this) { Destroy(this.gameObject); return; }
         _instance = this;
-        DontDestroyOnLoad(this.gameObject); // 씬이 바뀌어도 파괴되지 않음
+        DontDestroyOnLoad(this.gameObject);
     }
 
     private async void Start()
     {
-        // 게임이 시작되면 자동으로 서버에 접속 시도
         await ConnectToServerAsync();
     }
 
     private void OnDestroy()
     {
-        // 게임 종료 시 연결 해제
         DisconnectFromServer();
     }
-
     // --- 핵심 TCP 통신 로직 ---
 
     /// <summary>
@@ -103,7 +97,6 @@ public class NetworkManager : MonoBehaviour
         try
         {
             _client = new TcpClient();
-            Debug.Log($"[NetworkManager] 서버 접속 시도: {serverIP}:{serverPort}");
             await _client.ConnectAsync(serverIP, serverPort);
             _stream = _client.GetStream();
             _isConnected = true;
@@ -134,6 +127,7 @@ public class NetworkManager : MonoBehaviour
     private async Task ReceiveMessagesAsync()
     {
         byte[] buffer = new byte[4096];
+        string incompleteMessage = "";
         try
         {
             while (_isConnected)
@@ -141,74 +135,83 @@ public class NetworkManager : MonoBehaviour
                 int bytesRead = await _stream.ReadAsync(buffer, 0, buffer.Length);
                 if (bytesRead == 0)
                 {
-                    // 서버가 연결을 정상적으로 끊음
-                    Debug.LogWarning("[NetworkManager] 서버가 연결을 끊었습니다.");
                     DisconnectFromServer();
                     break;
                 }
 
-                string message = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+                string receivedData = incompleteMessage + Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
-                // '범용' 이벤트(OnMessageReceived)로 가기 전에,
-                // '특수 태그'들을 먼저 모두 필터링합니다.
+                // [핵심] '\n'을 기준으로 메시지 분리 (JSON 경계 처리)
+                string[] messages = receivedData.Split(new[] { '\n' }, StringSplitOptions.None);
 
-                if (message.StartsWith("[USER_COUNT]"))
+                // 마지막 조각 제외하고 처리 (마지막 조각은 다음 데이터와 이어질 수 있음)
+                for (int i = 0; i < messages.Length - 1; i++)
                 {
-                    // 예: "[USER_COUNT] 2/6" -> "2/6"
-                    string countStr = message.Substring("[USER_COUNT]".Length).Trim();
-                    MainThreadDispatcher.ExecuteOnMainThread(() => OnUserCountUpdated?.Invoke(countStr));
-                    continue; // 채팅 로그에는 표시 안 함
-                }
-
-                if (message.StartsWith("[USER_LIST]"))
-                {
-                    // 예: "[USER_LIST] A:3,B:0"
-                    string dataStr = message.Substring("[USER_LIST]".Length).Trim();
-                    var userList = new System.Collections.Generic.List<UserData>();
-
-                    if (!string.IsNullOrEmpty(dataStr))
+                    if (!string.IsNullOrEmpty(messages[i]))
                     {
-                        string[] users = dataStr.Split(',');
-                        foreach (var userStr in users)
-                        {
-                            // "닉:승" (2개) 파싱
-                            string[] parts = userStr.Split(':');
-                            if (parts.Length == 2 && int.TryParse(parts[1], out int score))
-                            {
-                                userList.Add(new UserData { Nickname = parts[0], Score = score });
-                            }
-                        }
+                        HandleJsonMessage(messages[i]);
                     }
-                    MainThreadDispatcher.ExecuteOnMainThread(() => OnUserListReceived?.Invoke(userList));
-                    continue; // 처리 완료. 범용 이벤트로 보내지 않음.
                 }
 
-                // 퀴즈/시스템 관련 메시지(PopupManager, ChatUI가 구독)와
-                // 진짜 유저 채팅('[닉네임]...')을 구분합니다.
-                if (message.StartsWith("[") && message.Contains("]"))
-                {
-                    // [퀴즈], [힌트], [정답!], [서버], [오류], [시간 초과], [닉네임]...
-                    // 이 모든 메시지는 '범용' 이벤트로 보냅니다.
-                    // (ChatUI와 PopupManager가 알아서 필터링할 것입니다)
-                    MainThreadDispatcher.ExecuteOnMainThread(() =>
-                        OnMessageReceived?.Invoke(message)
-                    );
-                }
-                else
-                {
-                    // (태그가 없는 비정상 메시지)
-                    Debug.LogWarning($"[NetworkManager] 태그가 없는 메시지 수신: {message}");
-                }
+                // 남은 조각 저장
+                incompleteMessage = messages[messages.Length - 1];
             }
         }
         catch (Exception e)
         {
-            // 네트워크 오류로 연결 끊김
-            if (_isConnected) // 우리가 끈 게 아니라면
+            if (_isConnected) { Debug.LogError($"수신 오류: {e.Message}"); DisconnectFromServer(); }
+        }
+    }
+
+    private void HandleJsonMessage(string jsonMessage)
+    {
+        try
+        {
+            // 1. Type 확인
+            JObject jsonObj = JObject.Parse(jsonMessage);
+            string messageType = jsonObj["type"]?.ToString();
+
+            if (string.IsNullOrEmpty(messageType)) return;
+
+            // 2. 메인 스레드에서 이벤트 발생
+            MainThreadDispatcher.ExecuteOnMainThread(() =>
             {
-                Debug.LogError($"[NetworkManager] 메시지 수신 오류: {e.Message}");
-                DisconnectFromServer();
-            }
+                try
+                {
+                    switch (messageType)
+                    {
+                        case "CHAT":
+                            OnChatMessageReceived?.Invoke(jsonObj.ToObject<ChatPacket>());
+                            break;
+                        case "USER_COUNT":
+                            OnUserCountUpdated?.Invoke(jsonObj.ToObject<UserCountPacket>());
+                            break;
+                        case "USER_LIST":
+                            OnUserListReceived?.Invoke(jsonObj.ToObject<UserListPacket>());
+                            break;
+                        case "QUIZ_START":
+                            OnQuizStarted?.Invoke(jsonObj.ToObject<QuizStartPacket>());
+                            break;
+                        case "HINT":
+                            OnHintReceived?.Invoke(jsonObj.ToObject<HintPacket>());
+                            break;
+                        case "WINNER":
+                            OnWinnerReceived?.Invoke(jsonObj.ToObject<WinnerPacket>());
+                            break;
+                        case "QUIZ_END":
+                            OnQuizEnded?.Invoke(jsonObj.ToObject<QuizEndPacket>());
+                            break;
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"이벤트 처리 실패: {e.Message}");
+                }
+            });
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"JSON 파싱 실패: {jsonMessage} / {e.Message}");
         }
     }
 
@@ -218,8 +221,6 @@ public class NetworkManager : MonoBehaviour
     public void SendChatMessage(string message)
     {
         if (!_isConnected || string.IsNullOrEmpty(message)) return;
-
-        // UI 스레드에서 호출하므로, Task로 감싸서 비동기 실행
         _ = SendMessageToServerAsync(message);
     }
 
@@ -233,11 +234,7 @@ public class NetworkManager : MonoBehaviour
             byte[] data = Encoding.UTF8.GetBytes(message);
             await _stream.WriteAsync(data, 0, data.Length);
         }
-        catch (Exception e)
-        {
-            Debug.LogError($"[NetworkManager] 메시지 전송 오류: {e.Message}");
-            DisconnectFromServer(); // 전송 실패 시 연결 끊김 처리
-        }
+        catch (Exception) { DisconnectFromServer(); }
     }
 
     /// <summary>
@@ -246,14 +243,10 @@ public class NetworkManager : MonoBehaviour
     private void DisconnectFromServer()
     {
         if (!_isConnected) return;
-
         _isConnected = false;
         _stream?.Close();
         _client?.Close();
-
-        Debug.LogWarning("[NetworkManager] 서버 연결 종료.");
-        MainThreadDispatcher.ExecuteOnMainThread(() =>
-            OnConnectionStateChanged?.Invoke(false)
-        );
+        MainThreadDispatcher.ExecuteOnMainThread(() 
+            => OnConnectionStateChanged?.Invoke(false));
     }
 }

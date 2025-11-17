@@ -1,6 +1,4 @@
-// Assets/Scripts/DataModels/Pokemon.cs (새 폴더 'DataModels'를 추천합니다)
-
-// 1. JSON 변환기가 이 클래스를 사용하도록 선언
+// Assets/Scripts/DataModels/Pokemon.cs 
 using Newtonsoft.Json;
 
 /// <summary>
@@ -33,12 +31,38 @@ public class Pokemon
     [JsonProperty("typeA")]
     public string TypeA { get; set; }
 
-    // JSON에서 'null'일 수 있는 값은 C#에서도 '?' (nullable)로 받아야 합니다.
     [JsonProperty("typeB")]
     public string? TypeB { get; set; }
 
     [JsonProperty("generation")]
     public int Generation { get; set; }
+
+    [JsonProperty("genderUnknown")]
+    public bool GenderUnknown { get; set; }
+
+    [JsonProperty("genderMale")]
+    public float GenderMale { get; set; }
+
+    [JsonProperty("genderFemale")]
+    public float GenderFemale { get; set; }
+
+    [JsonProperty("eggSteps")]
+    public int EggSteps { get; set; }
+
+    [JsonProperty("eggGroup1")]
+    public string EggGroup1 { get; set; }
+
+    [JsonProperty("eggGroup2")]
+    public string? EggGroup2 { get; set; }
+
+    [JsonProperty("catchRate")]
+    public int CatchRate { get; set; }
+
+    [JsonProperty("experienceGroup")]
+    public string ExperienceGroup { get; set; }
+
+    [JsonProperty("rarityCategory")]
+    public string RarityCategory { get; set; }
 
     [JsonProperty("h")]
     public int H { get; set; }

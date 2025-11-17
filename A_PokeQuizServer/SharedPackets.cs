@@ -67,6 +67,6 @@ namespace SharedPackets
     // 퀴즈 종료 (시간 초과 또는 정답)
     public class QuizEndPacket : BasePacket
     {
-        public string reasonMessage; // (선택) "[시간 초과] 정답은..."
+        public string reasonMessage; // "[시간 초과] 정답은..."
     }
 }

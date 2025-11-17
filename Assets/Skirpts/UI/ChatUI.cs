@@ -3,7 +3,7 @@
 using UnityEngine;
 using TMPro; // TextMeshPro (TMP) UI를 사용하기 위해
 using UnityEngine.UI; // Button, ScrollRect
-using System.Collections.Generic; // 채팅 로그 관리를 위해
+using SharedPackets; // 패킷 사용
 
 /// <summary>
 /// [옵저버] '2. Main Chat UI'를 관리합니다.
@@ -30,66 +30,39 @@ public class ChatUI : MonoBehaviour
     [Tooltip("(선택) 서버 연결 상태를 표시할 텍스트")]
     [SerializeField] private TMP_Text statusText;
 
-    private List<GameObject> chatLog = new List<GameObject>(); // 생성된 메시지 관리
-
     private void OnEnable()
     {
         // NetworkManager의 '신호(이벤트)'를 '구독'합니다.
-        NetworkManager.OnMessageReceived += HandleServerMessage;
+        NetworkManager.OnChatMessageReceived += HandleChatMessage;
         NetworkManager.OnConnectionStateChanged += HandleConnectionState;
 
         // 버튼 클릭 이벤트와 입력창 'Enter' 이벤트에 '메시지 전송' 함수를 연결
-        sendButton.onClick.AddListener(OnSendButtonClicked);
-        chatInputField.onSubmit.AddListener(OnInputFieldSubmit);
+        sendButton.onClick.AddListener(SendChatMessage);
+        chatInputField.onSubmit.AddListener(delegate { SendChatMessage(); });
     }
 
     private void OnDisable()
     {
         // 오브젝트가 비활성화되면 '구독'을 '해제'합니다. (메모리 누수 방지)
-        NetworkManager.OnMessageReceived -= HandleServerMessage;
+        NetworkManager.OnChatMessageReceived -= HandleChatMessage;
         NetworkManager.OnConnectionStateChanged -= HandleConnectionState;
 
-        sendButton.onClick.RemoveListener(OnSendButtonClicked);
-        chatInputField.onSubmit.RemoveListener(OnInputFieldSubmit);
+        sendButton.onClick.RemoveListener(SendChatMessage);
+        chatInputField.onSubmit.RemoveListener(delegate { SendChatMessage(); });
     }
 
     /// <summary>
     /// NetworkManager로부터 '메시지 수신' 신호를 받았을 때 호출됩니다.
     /// </summary>
-    private void HandleServerMessage(string message)
+    private void HandleChatMessage(ChatPacket pkt)
     {
-        Color messageColor = Color.white;
-        bool isChatMessage = false;
-
-        // 퀴즈 시작/힌트 관련 메시지는 PopupManager가 전담하므로,
-        // 채팅 로그에서는 이 메시지들을 '무시(return)'합니다.
-        if (message.StartsWith("[퀴즈] 새 퀴즈를") ||
-            message.StartsWith("[퀴즈] 문제를 가져왔습니다") ||
-            message.StartsWith("[힌트]"))
+        Color color = Color.white;
+        // 헥사 코드(#RRGGBB)를 컬러로 변환
+        if (!string.IsNullOrEmpty(pkt.colorHex))
         {
-            return; // 채팅 로그에 추가하지 않고 무시
+            ColorUtility.TryParseHtmlString(pkt.colorHex, out color);
         }
-
-        // 힌트가 아닌 모든 메시지(시스템, 채팅, 정답, 시간 초과 등)는 로그에 추가합니다.
-        if (message.StartsWith("[정답!]") || message.StartsWith("[시간 초과]"))
-        {
-            messageColor = Color.yellow;
-            isChatMessage = true;
-        }
-        else if (message.StartsWith("[시스템]") || message.StartsWith("[서버]"))
-        {
-            messageColor = Color.green;
-            isChatMessage = true;
-        }
-        else if (message.StartsWith("[")) // [닉네임]...
-        {
-            isChatMessage = true;
-        }
-
-        if (isChatMessage)
-        {
-            AddMessageToChatLog(message, messageColor);
-        }
+        AddMessageToChatLog(pkt.message, color);
     }
 
     /// <summary>
@@ -139,7 +112,7 @@ public class ChatUI : MonoBehaviour
     }
 
     /// <summary>
-    /// (핵심) 입력창의 텍스트를 NetworkManager로 전송합니다.
+    /// 입력창의 텍스트를 NetworkManager로 전송합니다.
     /// </summary>
     private void SendChatMessage()
     {
@@ -160,41 +133,23 @@ public class ChatUI : MonoBehaviour
     }
 
     /// <summary>
-    /// (핵심) 서버 메시지를 받아 '채팅 프리팹'을 생성하고 로그에 추가합니다.
+    /// 서버 메시지를 받아 '채팅 프리팹'을 생성하고 로그에 추가합니다.
     /// </summary>
     private void AddMessageToChatLog(string message, Color color)
     {
-        if (chatMessagePrefab == null || chatContentTransform == null)
-        {
-            Debug.LogError("[ChatUI] 프리팹 또는 Content가 연결되지 않았습니다!");
-            return;
-        }
+        if (chatMessagePrefab == null) return;
 
-        // 1. 11-A 단계에서 만든 '채팅 프리팹'을 'Content' 자식으로 생성
         GameObject newMsg = Instantiate(chatMessagePrefab, chatContentTransform);
-        chatLog.Add(newMsg); // (선택) 로그 관리를 위해 리스트에 추가
 
-        // 2. 생성된 프리팹에서 TMP_Text 컴포넌트를 찾아 텍스트 설정
         TMP_Text tmpText = newMsg.GetComponent<TMP_Text>();
         if (tmpText != null)
         {
             tmpText.text = message;
-            tmpText.color = color; // [수정됨] 색상 적용
+            tmpText.color = color;
         }
 
-        // 3. (자동 스크롤) 새 메시지가 추가되면 스크롤을 맨 아래로 내림
-        // 레이아웃이 갱신된 '다음 프레임'에 스크롤을 이동해야 정확합니다.
-        StartCoroutine(ScrollToBottom());
-    }
-
-    private System.Collections.IEnumerator ScrollToBottom()
-    {
-        // 다음 프레임까지 대기
-        yield return null;
-
-        if (chatScrollRect != null)
-        {
-            chatScrollRect.verticalNormalizedPosition = 0f;
-        }
+        // 자동 스크롤
+        Canvas.ForceUpdateCanvases();
+        chatScrollRect.verticalNormalizedPosition = 0f;
     }
 }

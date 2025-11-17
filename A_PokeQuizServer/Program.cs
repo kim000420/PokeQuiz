@@ -3,12 +3,14 @@ using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Collections.Concurrent; // 스레드 안전한 딕셔너리
+using System.Collections.Concurrent;
 using System.Threading.Tasks;
-using System.Threading; // CancellationTokenSource (타이머 취소용)
-using System.Linq; // Random.Shared
-using System.Collections.Generic; // List
-using MySqlConnector; // 9-A 단계에서 설치한 MySQL 드라이버
+using System.Threading;
+using System.Linq; 
+using System.Collections.Generic; 
+using MySqlConnector; 
+using Newtonsoft.Json;
+using SharedPackets;     
 
 class Program
 {
@@ -90,8 +92,9 @@ class Program
             bool isLoginSuccess = await RegisterOrLoginUserAsync(nickname);
             if (!isLoginSuccess)
             {
-                // DB 오류 시 접속 거부
-                await SendMessageToClientAsync(client, "[오류] 서버 DB 문제로 접속할 수 없습니다.");
+                // JSON으로 귓속말 전송
+                var errorPkt = new ChatPacket { type = "CHAT", message = "[오류] 서버 DB 문제로 접속할 수 없습니다.", colorHex = "#FF0000" };
+                await SendJsonToClientAsync(client, errorPkt);
                 client.Close();
                 return;
             }
@@ -100,15 +103,17 @@ class Program
             clients.TryAdd(client, nickname);
             Console.WriteLine($"[INFO] '{nickname}' 님이 접속했습니다. (총 {clients.Count}명)");
 
-            // 접속자 수 방송 & 내 점수 전송
+            // 접속자 수/목록 방송
             await BroadcastUserCountAsync();
-            await BroadcastUserListAsync();// 로그인하자마자 내 점수 갱신
+            await BroadcastUserListAsync();
 
-            // 채팅 서버 입장 완료: 본인에게 환영 메시지 전송
-            await SendMessageToClientAsync(client, $"[서버] '{nickname}'님, 환영합니다. '/퀴즈시작'을 입력해 퀴즈를 시작하세요.");
+            // 환영 메시지 (JSON 귓속말)
+            var welcomePkt = new ChatPacket { type = "CHAT", message = $"[서버] '{nickname}'님, 환영합니다. '/퀴즈시작'을 입력하세요.", colorHex = "#00FF00" };
+            await SendJsonToClientAsync(client, welcomePkt);
 
-            // 채팅 서버 입장 완료: 다른 모두에게 입장 알림
-            await BroadcastMessageAsync($"[서버] '{nickname}' 님이 입장했습니다.", client);
+            // 입장 알림 (JSON 방송)
+            var enterPkt = new ChatPacket { type = "CHAT", message = $"[서버] '{nickname}' 님이 입장했습니다.", colorHex = "#AAAAAA" };
+            await BroadcastJsonAsync(enterPkt, client);
 
             // 채팅 메시지 수신 루프
             while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
@@ -134,18 +139,23 @@ class Program
 
                 if (isAnswer)
                 {
-                    // 정답자 발생
-                    await BroadcastMessageAsync($"[정답!] '{nickname}' 님이 정답 '{currentQuizAnswer!.SpeciesKorName}'을(를) 맞혔습니다!", null);
+                    // [수정] 정답자 발생 (JSON 방송)
+                    int currentScore = await GetUserScoreAsync(nickname); // 점수 갱신 전 점수 가져오기
+                    var winnerPkt = new WinnerPacket
+                    {
+                        type = "WINNER",
+                        winnerName = nickname,
+                        answerPokemon = currentQuizAnswer!.SpeciesKorName,
+                        newScore = currentScore + 1 // 1점 오른 점수
+                    };
+                    await BroadcastJsonAsync(winnerPkt, null);
 
-                    // 점수 업데이트 트랜잭션 실행
-                    var currentPlayers = clients.Values.ToList();
+                    // 점수 업데이트
                     await UpdateGameResultAsync(nickname);
-
-                    // 승리한 유저에게 '갱신된 점수' 다시 전송
                     await BroadcastUserListAsync();
-                    
+
                     // 퀴즈 즉시 종료
-                    await StopQuizAsync(); 
+                    await StopQuizAsync(null); // 정답자가 있으므로 추가 메시지 없음
                 }
                 else if (message.Equals("/퀴즈시작", StringComparison.OrdinalIgnoreCase))
                 {
@@ -154,8 +164,10 @@ class Program
                 }
                 else
                 {
-                    // 일반 채팅
-                    await BroadcastMessageAsync($"[{nickname}] {message}", client);
+                    // 일반 채팅 (JSON 방송)
+                    // TODO: 유저가 "[HINT]" 같은 태그를 입력하지 못하게 필터링 필요
+                    var chatPkt = new ChatPacket { type = "CHAT", message = $"[{nickname}] {message}", colorHex = "#FFFFFF" };
+                    await BroadcastJsonAsync(chatPkt, client);
                 }
             }
         }
@@ -166,16 +178,16 @@ class Program
         }
         finally
         {
-            // 클라이언트 목록에서 제거
             clients.TryRemove(client, out _);
             client.Close();
-
-            // 접속자 수 갱신 방송
             _ = BroadcastUserCountAsync();
             _ = BroadcastUserListAsync();
 
             Console.WriteLine($"[INFO] '{nickname}' 님 퇴장. (남은 {clients.Count}명)");
-            await BroadcastMessageAsync($"[서버] '{nickname}' 님이 퇴장했습니다.", null);
+
+            // 퇴장 알림 (JSON 방송)
+            var exitPkt = new ChatPacket { type = "CHAT", message = $"[서버] '{nickname}' 님이 퇴장했습니다.", colorHex = "#AAAAAA" };
+            await BroadcastJsonAsync(exitPkt, null);
         }
     }
 
@@ -201,15 +213,17 @@ class Program
             quizTimerCancelToken = new CancellationTokenSource(); // 새 타이머 '취소 토큰' 생성
         }
 
-        await BroadcastMessageAsync("[퀴즈] 포켓몬 퀴즈를 시작합니다!", null);
+        var startPkt = new QuizStartPacket { type = "QUIZ_START", message = "[퀴즈] 포켓몬 퀴즈를 시작합니다!" };
+        await BroadcastJsonAsync(startPkt, null);
 
-        // DB에서 랜덤 포켓몬 1마리 가져오기
         Pokemon? quiz = await GetRandomPokemonFromDbAsync();
 
         if (quiz == null)
         {
-            await BroadcastMessageAsync("[오류] DB에서 퀴즈를 가져오는 데 실패했습니다. 퀴즈를 종료합니다.", null);
-            await StopQuizAsync();
+            // 오류 알림 (JSON 방송)
+            var errorPkt = new ChatPacket { type = "CHAT", message = "[오류] DB에서 퀴즈를 가져오는 데 실패했습니다.", colorHex = "#FF0000" };
+            await BroadcastJsonAsync(errorPkt, null);
+            await StopQuizAsync(null); // (매개변수 추가)
             return;
         }
 
@@ -218,13 +232,13 @@ class Program
         currentQuizHints = GenerateHintList(quiz); // 힌트 목록 생성
 
         Console.WriteLine($"[QUIZ] 퀴즈 시작. 정답: {quiz.SpeciesKorName} (ID: {quiz.Id})");
-        await BroadcastMessageAsync("[퀴즈] 문제를 가져왔습니다! 15초 후 첫 번째 힌트가 나갑니다.", null);
+        // (문제를 가져왔습니다 메시지는 QUIZ_START로 대체됨)
 
-        // 15초 힌트 타이머 시작
-        // (await를 붙이지 않아야 다른 채팅을 계속 처리할 수 있음)
+        // 첫 힌트 바로 전송
         if (currentQuizHints != null && currentQuizHints.Count > 0)
         {
-            await BroadcastMessageAsync($"[힌트] {currentQuizHints[0]}", null);
+            var firstHintPkt = new HintPacket { type = "HINT", hintContent = currentQuizHints[0] };
+            await BroadcastJsonAsync(firstHintPkt, null);
         }
 
         //  15초 힌트 타이머는 '두 번째 힌트부터'(.Skip(1)) 시작
@@ -298,7 +312,7 @@ class Program
     // ========================================================================
 
     /// <summary>
-    /// 15초마다 힌트를 하나씩 방송합니다. (기능 5)
+    /// 15초마다 힌트를 하나씩 방송합니다.
     /// </summary>
     private static async Task StartHintTimerAsync(IEnumerable<string> remainingHints, CancellationToken cancelToken)
     {
@@ -316,7 +330,8 @@ class Program
                 Console.WriteLine("[INFO] 힌트 타이머가 정상적으로 취소되었습니다.");
                 return;
             }
-            await BroadcastMessageAsync($"[힌트] {hint}", null);
+            var hintPkt = new HintPacket { type = "HINT", hintContent = hint };
+            await BroadcastJsonAsync(hintPkt, null);
         }
 
         // 모든 힌트(초성 포함)가 나간 후, 정답을 맞힐 '마지막 15초'를 기다립니다.
@@ -332,14 +347,14 @@ class Program
         }
 
         // 15초가 지났는데도 정답자가 없음 (시간 초과)
-        await BroadcastMessageAsync($"[시간 초과] 정답은 '{currentQuizAnswer?.SpeciesKorName}'였습니다!", null);
-        await StopQuizAsync(); // 퀴즈 자동 종료
+        string timeOutMsg = $"[시간 초과] 정답은 '{currentQuizAnswer?.SpeciesKorName}'였습니다!";
+        await StopQuizAsync(timeOutMsg);
     }
 
     /// <summary>
-    /// 퀴즈를 즉시 종료합니다. (정답을 맞혔거나, 시간 초과 시)
+    /// 퀴즈를 즉시 종료하고 'QuizEndPacket'을 방송합니다.
     /// </summary>
-    private static async Task StopQuizAsync()
+    private static async Task StopQuizAsync(string? reasonMessage)
     {
         lock (quizLock)
         {
@@ -350,12 +365,25 @@ class Program
             currentQuizAnswer = null;
             currentQuizHints = null;
 
-            // (기능 5) 실행 중인 15초 힌트 타이머를 '강제 취소'
+            // 실행 중인 15초 힌트 타이머를 '강제 취소'
             quizTimerCancelToken?.Cancel();
             quizTimerCancelToken = null;
         }
+
+        // 퀴즈 종료 패킷 방송
+        var endPkt = new QuizEndPacket
+        {
+            type = "QUIZ_END",
+            // 시간 초과 메시지 또는 정답자가 맞혔다는 메시지 (null일 수 있음)
+            reasonMessage = reasonMessage
+        };
+        await BroadcastJsonAsync(endPkt, null);
+
         await Task.Delay(1000); // 1초 대기
-        await BroadcastMessageAsync("[퀴즈] 퀴즈가 종료되었습니다.\n[퀴즈] '/퀴즈시작'으로 다시 시작할 수 있습니다.", null);
+
+        // 재시작 안내 (ChatPacket)
+        var restartPkt = new ChatPacket { type = "CHAT", message = "[퀴즈] '/퀴즈시작'으로 다시 시작할 수 있습니다.", colorHex = "#AAAAAA" };
+        await BroadcastJsonAsync(restartPkt, null);
     }
 
     /// <summary>
@@ -430,13 +458,15 @@ class Program
     // ========================================================================
 
     /// <summary>
-    /// 모든 클라이언트에게 메시지를 방송(Broadcast)합니다.
-    /// 'sender'가 null이 아니면, 그 클라이언트는 제외합니다 (선택).
+    /// 객체를 JSON으로 직렬화하여 모든 클라이언트에게 방송합니다.
     /// </summary>
-    private static async Task BroadcastMessageAsync(string message, TcpClient? sender)
+    private static async Task BroadcastJsonAsync(BasePacket packet, TcpClient? sender)
     {
-        Console.WriteLine($"[BROADCAST] {message}"); // 서버 로그에도 기록
-        byte[] data = Encoding.UTF8.GetBytes(message + "\n"); // (Unity 클라이언트를 위해 개행 문자 추가)
+        string jsonMessage = JsonConvert.SerializeObject(packet);
+        Console.WriteLine($"[BROADCAST_JSON] {jsonMessage}");
+
+        // \n을 메시지 '구분자'로 사용
+        byte[] data = Encoding.UTF8.GetBytes(jsonMessage + "\n");
 
         List<TcpClient> disconnectedClients = new List<TcpClient>();
 
@@ -444,6 +474,7 @@ class Program
         foreach (var clientEntry in clients)
         {
             TcpClient client = clientEntry.Key;
+
             try
             {
                 NetworkStream stream = client.GetStream();
@@ -458,19 +489,20 @@ class Program
     }
 
     /// <summary>
-    /// 특정 클라이언트 1명에게만 메시지를 보냅니다. (귓속말)
+    /// 특정 클라이언트 1명에게만 JSON 객체를 보냅니다. (귓속말)
     /// </summary>
-    private static async Task SendMessageToClientAsync(TcpClient client, string message)
+    private static async Task SendJsonToClientAsync(TcpClient client, BasePacket packet)
     {
         try
         {
-            byte[] data = Encoding.UTF8.GetBytes(message + "\n");
+            string jsonMessage = JsonConvert.SerializeObject(packet);
+            byte[] data = Encoding.UTF8.GetBytes(jsonMessage + "\n");
             NetworkStream stream = client.GetStream();
             await stream.WriteAsync(data, 0, data.Length);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[WARN] 귓속말 전송 실패: {ex.Message}");
+            Console.WriteLine($"[WARN] 귓속말(JSON) 전송 실패: {ex.Message}");
         }
     }
 
@@ -538,17 +570,21 @@ class Program
     // ========================================================================
 
     /// <summary>
-    /// 모든 유저에게 '현재 접속자 수'를 "N/M" 형식으로 방송합니다.
+    /// 모든 유저에게 '현재 접속자 수'를 "JSON"으로 방송합니다.
     /// </summary>
     private static async Task BroadcastUserCountAsync()
     {
         int count = clients.Count;
-        await BroadcastMessageAsync($"[USER_COUNT] [ {count}/{MaxPlayers} ]", null);
+        var countPkt = new UserCountPacket
+        {
+            type = "USER_COUNT",
+            countText = $"[ {count}/{MaxPlayers} ]"
+        };
+        await BroadcastJsonAsync(countPkt, null);
     }
 
     /// <summary>
-    /// 모든 유저에게 '접속자 명단'과 '승수'를 방송합니다.
-    /// 형식: [USER_LIST] 닉네임1:승수,닉네임2:승수,...
+    /// 모든 유저에게 '접속자 명단'과 '승수'를 "JSON"으로 방송합니다.
     /// </summary>
     private static async Task BroadcastUserListAsync()
     {
@@ -556,56 +592,55 @@ class Program
         {
             // 현재 접속 중인 모든 닉네임 수집
             var activeNicknames = clients.Values.ToList();
-            if (activeNicknames.Count == 0)
+            var userList = new List<UserData>(); // [수정] UserData 객체 리스트
+
+            if (activeNicknames.Count > 0)
             {
-                await BroadcastMessageAsync("[USER_LIST] ", null);
-                return;
-            }
-
-            // DB에서 접속 중인 유저들의 점수(Wins) 조회
-            var userListString = new StringBuilder();
-
-            using (var connection = new MySqlConnection(DbConnectionString))
-            {
-                await connection.OpenAsync();
-
-                // IN (...) 쿼리를 만들기 위해 파라미터 동적 생성
-                // 예: SELECT u.Nickname, s.Wins FROM ... WHERE u.Nickname IN ('User1', 'User2')
-                var parameters = new List<string>();
-                for (int i = 0; i < activeNicknames.Count; i++)
+                // DB에서 접속 중인 유저들의 점수(Wins) 조회
+                using (var connection = new MySqlConnection(DbConnectionString))
                 {
-                    parameters.Add($"@nick{i}");
-                }
+                    await connection.OpenAsync();
 
-                string inClause = string.Join(",", parameters);
-                string sql = $@"
-                    SELECT u.Nickname, s.Wins 
-                    FROM Scoreboard s
-                    JOIN Users u ON s.UserId = u.Id
-                    WHERE u.Nickname IN ({inClause});";
-
-                var cmd = new MySqlCommand(sql, connection);
-                for (int i = 0; i < activeNicknames.Count; i++)
-                {
-                    cmd.Parameters.AddWithValue($"@nick{i}", activeNicknames[i]);
-                }
-
-                // 결과 읽어서 문자열 조합 ("닉네임:점수,")
-                using (var reader = await cmd.ExecuteReaderAsync())
-                {
-                    while (await reader.ReadAsync())
+                    var parameters = new List<string>();
+                    for (int i = 0; i < activeNicknames.Count; i++)
                     {
-                        string nick = reader.GetString("Nickname");
-                        int wins = reader.GetInt32("Wins");
-                        userListString.Append($"{nick}:{wins},");
+                        parameters.Add($"@nick{i}");
+                    }
+                    string inClause = string.Join(",", parameters);
+                    string sql = $@"
+                        SELECT u.Nickname, s.Wins 
+                        FROM Scoreboard s
+                        JOIN Users u ON s.UserId = u.Id
+                        WHERE u.Nickname IN ({inClause});";
+
+                    var cmd = new MySqlCommand(sql, connection);
+                    for (int i = 0; i < activeNicknames.Count; i++)
+                    {
+                        cmd.Parameters.AddWithValue($"@nick{i}", activeNicknames[i]);
+                    }
+
+                    using (var reader = await cmd.ExecuteReaderAsync())
+                    {
+                        while (await reader.ReadAsync())
+                        {
+                            // UserData 객체로 추가
+                            userList.Add(new UserData
+                            {
+                                Nickname = reader.GetString("Nickname"),
+                                Score = reader.GetInt32("Wins")
+                            });
+                        }
                     }
                 }
             }
 
-            // 마지막 쉼표 제거 및 방송
-            string finalData = userListString.ToString().TrimEnd(',');
-            // 예: "[USER_LIST] 유니티테스터:3,친구1:0"
-            await BroadcastMessageAsync($"[USER_LIST] {finalData}", null);
+            // JSON 패킷으로 방송
+            var listPkt = new UserListPacket
+            {
+                type = "USER_LIST",
+                users = userList
+            };
+            await BroadcastJsonAsync(listPkt, null);
         }
         catch (Exception ex)
         {
@@ -616,6 +651,38 @@ class Program
     // ========================================================================
     // [점수 업데이트 트랜잭션]
     // ========================================================================
+
+    /// <summary>
+    /// (DB 헬퍼) 닉네임으로 현재 점수를 조회합니다.
+    /// </summary>
+    private static async Task<int> GetUserScoreAsync(string nickname)
+    {
+        try
+        {
+            using (var connection = new MySqlConnection(DbConnectionString))
+            {
+                await connection.OpenAsync();
+                string sql = @"
+                    SELECT s.Wins 
+                    FROM Scoreboard s
+                    JOIN Users u ON s.UserId = u.Id
+                    WHERE u.Nickname = @nickname;";
+                var cmd = new MySqlCommand(sql, connection);
+                cmd.Parameters.AddWithValue("@nickname", nickname);
+
+                object result = await cmd.ExecuteScalarAsync();
+                if (result != null)
+                {
+                    return Convert.ToInt32(result);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[DB 오류] 점수 조회 실패: {ex.Message}");
+        }
+        return 0;
+    }
 
     /// <summary>
     /// 퀴즈가 끝났을 때 '승자'의 점수만 트랜잭션으로 안전하게 업데이트합니다.
