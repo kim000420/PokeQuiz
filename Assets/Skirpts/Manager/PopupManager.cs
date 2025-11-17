@@ -2,8 +2,10 @@
 
 using UnityEngine;
 using TMPro;
+using System.Collections;
 using System.Collections.Generic;
 using SharedPackets;
+using DG.Tweening;
 
 /// <summary>
 /// Quiz-Chat UI 영역의 모든 팝업을 관리합니다.
@@ -27,8 +29,15 @@ public class PopupManager : MonoBehaviour
     [SerializeField] private TMP_Text winnerNameText;
     [Tooltip("정답 포켓몬 이름이 표시될 TMP_Text (TMP-Text_Answer)")]
     [SerializeField] private TMP_Text winnerAnswerText;
+    
+    [Header("Settings")]
+    [Tooltip("정답 팝업이 떠있는 시간 (초)")]
+    [SerializeField] private float winnerDisplayDuration = 3.0f;
+    [Tooltip("팝업 등장 애니메이션 시간 (초)")]
+    [SerializeField] private float animationDuration = 0.5f;
 
     private int _currentHintIndex = 0;
+    private Coroutine _winnerPopupRoutine;
 
     private void Awake()
     {
@@ -63,6 +72,7 @@ public class PopupManager : MonoBehaviour
     /// </summary>
     private void HandleQuizStarted(QuizStartPacket pkt)
     {
+        StopWinnerRoutine();
         InitializeHintPopup();
     }
 
@@ -73,12 +83,13 @@ public class PopupManager : MonoBehaviour
 
     private void HandleWinnerReceived(WinnerPacket pkt)
     {
-        ShowWinnerPopup(pkt.winnerName, pkt.answerPokemon);
+        if (_winnerPopupRoutine != null) StopCoroutine(_winnerPopupRoutine);
+        _winnerPopupRoutine = StartCoroutine(ShowWinnerPopupRoutine(pkt.winnerName, pkt.answerPokemon));
     }
 
     private void HandleQuizEnded(QuizEndPacket pkt)
     {
-        HideAllPopups();
+        if (hintPopupObject != null) hintPopupObject.SetActive(false);
     }
 
     /// <summary>
@@ -112,19 +123,54 @@ public class PopupManager : MonoBehaviour
             _currentHintIndex++;
         }
     }
+    /// <summary>
+    /// 애니메이션과 대기 시간을 처리하는 코루틴
+    /// </summary>
+    private IEnumerator ShowWinnerPopupRoutine(string name, string pokemon)
+    {
+        // 힌트 팝업 끄기
+        if (hintPopupObject != null) hintPopupObject.SetActive(false);
+
+        // 데이터 설정
+        if (winnerPopupObject != null)
+        {
+            winnerNameText.text = name;
+            winnerAnswerText.text = pokemon;
+
+            winnerPopupObject.transform.DOKill();
+
+            // 초기화 (크기를 0으로)
+            winnerPopupObject.transform.localScale = Vector3.zero;
+            winnerPopupObject.SetActive(true);
+
+            // 등장 애니메이션 (Scale 0 -> 1, 부드럽게)
+            winnerPopupObject.transform.DOScale(1f, animationDuration).SetEase(Ease.OutBack);
+
+            // 유지 시간 대기 (n초)
+            yield return new WaitForSeconds(winnerDisplayDuration);
+
+            winnerPopupObject.SetActive(false);
+        }
+
+        _winnerPopupRoutine = null;
+    }
 
     /// <summary>
     /// 정답자 팝업활성화 및 텍스트 채우기
     /// </summary>
-    private void ShowWinnerPopup(string name, string pokemon)
+    private void StopWinnerRoutine()
     {
-        if (hintPopupObject != null) hintPopupObject.SetActive(false);
+        if (_winnerPopupRoutine != null)
+        {
+            StopCoroutine(_winnerPopupRoutine);
+            _winnerPopupRoutine = null;
+        }
 
         if (winnerPopupObject != null)
         {
-            winnerPopupObject.SetActive(true);
-            winnerNameText.text = name;
-            winnerAnswerText.text = pokemon;
+            // [DOTween] 트윈도 즉시 멈춤
+            winnerPopupObject.transform.DOKill();
+            winnerPopupObject.SetActive(false);
         }
     }
 
