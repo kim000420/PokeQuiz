@@ -35,6 +35,10 @@ public class PopupManager : MonoBehaviour
     [SerializeField] private float winnerDisplayDuration = 3.0f;
     [Tooltip("팝업 등장 애니메이션 시간 (초)")]
     [SerializeField] private float animationDuration = 0.5f;
+    [Tooltip("힌트 텍스트 등장 시간 (초)")]
+    [SerializeField] private float hintAnimDuration = 0.3f;
+    [Tooltip("힌트 등장 이징 효과")]
+    [SerializeField] private Ease hintAnimEase = Ease.OutBack;
 
     private int _currentHintIndex = 0;
     private Coroutine _winnerPopupRoutine;
@@ -102,11 +106,16 @@ public class PopupManager : MonoBehaviour
         {
             hintPopupObject.SetActive(true);
 
-            // [핵심] 힌트 인덱스를 0으로 리셋
+            // 힌트 인덱스를 0으로 리셋
             _currentHintIndex = 0;
 
             // 5개의 텍스트 슬롯을 모두 '???' (또는 빈 문자열 "")로 초기화
-            foreach (var slot in hintTextSlots) slot.text = "???";
+            foreach (var slot in hintTextSlots)
+            {
+                slot.text = "???";
+                // 애니메이션 후 크기가 0이거나 변형되었을 수 있으므로 정사이즈(1)로 리셋
+                slot.transform.localScale = Vector3.one;
+            }
         }
     }
 
@@ -119,7 +128,16 @@ public class PopupManager : MonoBehaviour
 
         if (_currentHintIndex < hintTextSlots.Count)
         {
-            hintTextSlots[_currentHintIndex].text = content;
+            TMP_Text targetSlot = hintTextSlots[_currentHintIndex];
+
+            // 텍스트 내용 변경 ("???" -> "실제 힌트")
+            targetSlot.text = content;
+
+            // 기존에 "???"가 있던 자리에서, 새 텍스트가 0부터 커지며 "톡!" 튀어나오는 효과
+            targetSlot.transform.DOKill(); // 혹시 모를 이전 트윈 제거
+            targetSlot.transform.localScale = Vector3.zero; // 크기 0으로 초기화
+            targetSlot.transform.DOScale(1f, hintAnimDuration).SetEase(hintAnimEase);
+
             _currentHintIndex++;
         }
     }
