@@ -5,6 +5,7 @@ using TMPro; // TextMeshPro (TMP) UI를 사용하기 위해
 using UnityEngine.UI; // Button, ScrollRect
 using SharedPackets; // 패킷 사용
 using DG.Tweening;
+using UnityEngine.InputSystem;
 
 /// <summary>
 /// Main Chat UI 관리
@@ -28,8 +29,9 @@ public class ChatUI : MonoBehaviour
     [Tooltip("스크롤 뷰의 ScrollRect 컴포넌트 (자동 스크롤용)")]
     [SerializeField] private ScrollRect chatScrollRect;
 
-    [Tooltip("(선택) 서버 연결 상태를 표시할 텍스트")]
-    [SerializeField] private TMP_Text statusText;
+    [Header("Window Controller")]
+    [Tooltip("채팅창 축소/확대를 제어하는 스크립트 연결")]
+    [SerializeField] private ChatWindowController windowController;
 
     [Header("Animation Settings")]
     [Tooltip("메시지가 튀어나오는 시간 (초)")]
@@ -45,8 +47,8 @@ public class ChatUI : MonoBehaviour
         NetworkManager.OnConnectionStateChanged += HandleConnectionState;
 
         // 버튼 클릭 이벤트와 입력창 'Enter' 이벤트에 '메시지 전송' 함수를 연결
-        sendButton.onClick.AddListener(SendChatMessage);
-        chatInputField.onSubmit.AddListener(delegate { SendChatMessage(); });
+        sendButton.onClick.AddListener(OnSendButtonClicked);
+        chatInputField.onSubmit.AddListener(OnInputFieldSubmit);
     }
 
     private void OnDisable()
@@ -55,8 +57,8 @@ public class ChatUI : MonoBehaviour
         NetworkManager.OnChatMessageReceived -= HandleChatMessage;
         NetworkManager.OnConnectionStateChanged -= HandleConnectionState;
 
-        sendButton.onClick.RemoveListener(SendChatMessage);
-        chatInputField.onSubmit.RemoveListener(delegate { SendChatMessage(); });
+        sendButton.onClick.RemoveListener(OnSendButtonClicked);
+        chatInputField.onSubmit.RemoveListener(OnInputFieldSubmit);
     }
 
     /// <summary>
@@ -80,12 +82,6 @@ public class ChatUI : MonoBehaviour
     {
         chatInputField.interactable = isConnected; // 연결되면 입력창 활성화
         sendButton.interactable = isConnected;     // 연결되면 버튼 활성화
-
-        if (statusText != null)
-        {
-            statusText.text = isConnected ? "서버: 온라인" : "서버: 오프라인";
-            statusText.color = isConnected ? Color.green : Color.red;
-        }
 
         if (isConnected)
         {
@@ -113,7 +109,9 @@ public class ChatUI : MonoBehaviour
     private void OnInputFieldSubmit(string text)
     {
         // 'Shift + Enter' (줄바꿈)가 아닐 때만 전송
-        if (!Input.GetKey(KeyCode.LeftShift) && !Input.GetKey(KeyCode.RightShift))
+        bool isShiftPressed = (Keyboard.current != null) &&
+                              (Keyboard.current.shiftKey.isPressed);
+        if (!isShiftPressed)
         {
             SendChatMessage();
         }
@@ -128,6 +126,10 @@ public class ChatUI : MonoBehaviour
 
         if (!string.IsNullOrEmpty(message))
         {
+            if (windowController != null)
+            {
+                windowController.IgnoreNextEndEdit = true;
+            }
             // UI 스크립트는 서버 통신을 '직접' 하지 않습니다.
             // 싱글톤 NetworkManager에 '요청'만 보냅니다.
             NetworkManager.Instance.SendChatMessage(message);
