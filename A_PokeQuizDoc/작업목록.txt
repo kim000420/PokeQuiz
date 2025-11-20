@@ -74,25 +74,19 @@ Program.cs에서 서버 시작 시 DataSeeder가 자동 실행되도록 설정.
 
 4단계: Unity와 서버의 통신 (HTTP -> TCP 전환)
 초기 시도 (HTTP API):
-
 QuizController.cs를 만들어 .../api/quiz/random 엔드포인트 생성.
-
 curl (VM 내부, Windows cmd) 테스트 성공.
 
-오류 발생: Unity(UnityWebRequest)에서만 Cannot connect to destination host 오류 발생.
-
+문제 발생: Unity(UnityWebRequest)에서만 Cannot connect to destination host 문제 발생.
 원인 분석:
-
 서버가 localhost로만 열려있음 -> dotnet run --urls "http://0.0.0.0:5065"로 해결.
-
 Windows 방화벽이 Unity.exe의 5065 포트 통신을 차단함 -> 방화벽 예외 추가.
 
-최종 해결: UnityWebRequest 대신 C# 표준 라이브러리인 **HttpClient**를 사용하여 PC 보안 정책을 우회하고 통신 성공 ([HttpClient 성공]).
+최종 해결: 
+UnityWebRequest 대신 C# 표준 라이브러리인 **HttpClient**를 사용하여 PC 보안 정책을 우회하고 통신 성공 ([HttpClient 성공]).
 
 설계 변경 (TCP 통합):
-
-님이 "간단한 게임 경험"을 위해 HTTP API 방식을 버리고, 기존 채팅 서버(ProgramTCPServer.cs)에 DB 기능을 통합하기로 결정.
-
+간단한 게임 경험을 위해 HTTP API 방식을 버리고, 기존 채팅 서버(ProgramTCPServer.cs)에 DB 기능을 통합하기로 결정.
 이유: 실시간 채팅과 퀴즈 로직을 하나의 TCP 소켓 연결로 처리하는 것이 더 효율적임.
 
 결과: PokemonChatServer라는 새로운 통합 프로젝트 생성.
@@ -103,105 +97,84 @@ Windows 방화벽이 Unity.exe의 5065 포트 통신을 차단함 -> 방화벽 예외 추가.
 목표: 복잡한 API 방식을 버리고, 기존 채팅 서버(ProgramTCPServer.cs)에 DB 접속 기능을 통합하여 구조 단순화.
 
 작업:
-
 PokemonChatServer 새 프로젝트 생성 및 MySqlConnector 설치.
-
 Program.cs 재작성: TcpListener (채팅) + MySqlConnection (DB 쿼리) + Timer (힌트) 로직 통합.
 
-오류 발생: CS1503 (Argument 1: cannot convert from 'string' to 'int').
-
+문제1: CS1503 (Argument 1: cannot convert from 'string' to 'int').
 원인: reader.IsDBNull("ColumnName") 메서드는 문자열 컬럼명을 지원하지 않음.
-
 해결: IsDBNull을 제거하고 string? 타입과 삼항 연산자로 NULL 처리 로직 변경.
 
-오류 발생: CS0246 (MySqlConnector not found).
-
+문제2: CS0246 (MySqlConnector not found).
 해결: dotnet add package MySqlConnector 및 dotnet restore로 종속성 복구.
+
+
 
 6단계: Unity 클라이언트 접속 & UI 기초
 목표: Unity에서 TCP 소켓으로 서버에 접속하고 메시지 송수신.
 
 작업:
-
 TCPChatClient.cs 작성 (초기 테스트용).
 
-오류 발생: UI 버튼과 입력창이 클릭 되지 않음 (반응 없음).
-
+문제: UI 버튼과 입력창이 클릭 되지 않음 (반응 없음).
 해결: Unity EventSystem의 Standalone Input Module 컴포넌트가 비활성화된 것을 발견하고 체크하여 해결.
+
+
 
 7단계: UI 구조화 (싱글톤 & 옵저버 패턴)
 목표: 네트워크 로직과 UI 로직의 분리.
 
 작업:
-
 NetworkManager.cs (Subject): 서버 통신 전담, 싱글톤 구현. MainThreadDispatcher를 도입하여 백그라운드 스레드 문제를 해결.
-
 ChatUI.cs (Observer): 채팅창 전담. NetworkManager 이벤트를 구독. Scroll View로 채팅 로그 구현.
-
 PopupManager.cs (Observer): 힌트/정답 팝업 전담.
-
 UI 수정: 힌트 팝업을 단일 텍스트에서 5개의 슬롯 리스트(List<TMP_Text>) 구조로 변경하고 스크립트 수정.
+
+
 
 7단계: 퀴즈 로직 고도화 (힌트 시스템)
 목표: 퀴즈의 재미를 위한 디테일한 룰 적용.
 
 작업:
-
 1번 힌트(타입) 즉시 방송.
-
 2~4번 힌트 랜덤, 5번 힌트 초성 고정.
-
 마지막 힌트 후 15초 대기.
 
-오류 발생: CS0266 (IEnumerable to List 변환 오류).
 
-해결: .ToList()를 추가하여 타입 명시적 변환.
 
-치명적 문제: 코드를 수정했는데도 서버가 **'옛날 로직(힌트 3개)'**으로 동작함.
-
-원인: FileZilla 덮어쓰기 실패 또는 빌드 캐시 문제.
-
-해결: nano 에디터로 VM에서 직접 수정하고 rm -rf obj bin으로 캐시 강제 삭제 후 해결.
-
-9단계: DB 트랜잭션 (데이터 무결성)
+8단계: DB 트랜잭션 (데이터 무결성)
 목표: 유저 정보와 점수판을 안전하게 저장.
 
 작업:
-
 MySQL Workbench에서 Users, Scoreboard 테이블 생성.
-
 RegisterOrLoginUserAsync: 접속 시 유저 등록과 점수판 생성을 트랜잭션으로 묶음.
-
 UpdateGameResultAsync: 정답 시 승자 점수(Wins) 업데이트 구현.
 
-10단계: 접속자 목록 및 점수 UI (UserListUI)
+
+
+9단계: 접속자 목록 및 점수 UI (UserListUI)
 목표: 우측 하단에 접속자 수(2/6)와 유저 명단 표시.
 
 작업:
 
 서버: [USER_COUNT], [USER_LIST] 태그 방송 기능 추가.
-
 클라이언트: UserListUI.cs 작성 및 NetworkManager 파싱 로직 추가.
 
-오류 발생: CS1002 (; expected), CS0103 (Method not found).
-
+문제: CS1002 (; expected), CS0103 (Method not found).
 해결: 누락된 세미콜론 추가, 실수로 삭제한 UpdateGameResultAsync 함수 복구.
 
-11단계: 최종 버그 수정 & 안정화
-문제 1: 채팅창에 [서버]..., [1/6]... 같은 시스템 메시지가 중복 출력됨.
 
+
+10단계: 최종 버그 수정 & 안정화
+문제: 채팅 UI에 출력되어야할 시스템 메세지가 인원수 출력 텍스트에 출력되는 현상 발생
 해결: NetworkManager에서 특수 태그를 먼저 필터링하고, ChatUI에서는 [로 시작하는 메시지(채팅)만 받도록 조건 강화.
 
-문제 2: 힌트가 Unity UI에 안 뜨고 서버 로그에만 뜸.
-
-해결: 서버 Program.cs를 최신 로직(14단계+20단계)이 모두 포함된 최종본으로 완전히 교체하고 캐시 삭제 후 재실행.
+결과: 태그 파싱 로직의 개선이 필요함을 느낌
 
 
 
-12단계: 초기 분석 및 아키텍처 리팩토링 (JSON 도입)
-[시작] 기존 문자열 파싱 방식([TAG] 데이터)의 한계(시스템 메시지 섞임, 유지보수 어려움) 확인.
-
-[수정] JSON 기반 프로토콜로 전면 리팩토링 결정.
+11단계: 패킷 송수신 방식 리팩토링 (JSON 도입)
+기존 문자열 파싱 방식([TAG] 데이터)의 한계(시스템 메시지 섞임, 유지보수 어려움) 확인.
+JSON 기반 프로토콜로 전면 리팩토링 결정.
 
 SharedPackets.cs 생성 (서버/클라 공용 패킷 정의).
 
@@ -209,75 +182,63 @@ SharedPackets.cs 생성 (서버/클라 공용 패킷 정의).
 
 클라이언트(NetworkManager.cs): \n 구분자로 메시지 경계 처리 및 JSON 파싱 로직 구현.
 
-[오류] 서버 컴파일 에러 발생 (서버용 Pokemon 클래스 필드 부족).
 
-[해결] Pokemon.cs에 힌트 생성에 필요한 필드(성비, 알걸음수 등) 추가하여 해결.
 
-13단계: 로그인 및 UI 시스템 구축
-[기능 추가] 로그인 시스템 구현.
+12단계: 로그인 및 UI 시스템 구축
+목표: 로그인 시스템 구현.
 
+작업:
 LoginRequest, LoginResponse 패킷 추가.
-
-서버: 중복 닉네임 시 '접속 차단' 대신 '로그인 허용'으로 로직 확정.
-
 클라이언트: UIManager를 생성하여 로그인 성공 시 게임 화면으로 전환하도록 중앙 관리.
-
-[기능 추가] User Info UI 구현 (로그인 후 내 닉네임 표시).
-
+User Info UI 구현 (로그인 후 내 닉네임 표시).
 NetworkManager에 닉네임 Getter 추가 및 UserInfoUI 연결.
 
-14단계: 퀴즈 및 채팅 UX 강화 (DOTween)
-[오류] 정답 팝업이 뜨자마자 퀴즈 종료 패킷 때문에 순식간에 사라지는 문제 발생.
 
-[해결] PopupManager 수정: 종료 패킷이 와도 팝업을 즉시 끄지 않고, 코루틴을 사용해 등장 애니메이션 -> 3초 대기 -> 종료 순으로 제어.
 
-[기능 추가] 시간 초과 시(정답자 없음) CPU가 정답을 맞힌 것처럼 팝업 연출 추가 (서버 로직 수정).
+13단계: 퀴즈 및 채팅 UX 강화 (DOTween)
+목표: 퀴즈 정답및 정답자 표시 문제 개선
 
-[기능 추가] 채팅 메시지와 힌트 텍스트 등장 시 DOTween(Ease.OutBack)을 적용하여 생동감 추가.
+작업:
+시간 초과 시(정답자 없음) CPU가 정답을 맞힌 것처럼 팝업 연출 추가 (서버 로직 수정).
+채팅 메시지와 힌트 텍스트 등장 시 DOTween(Ease.OutBack)을 적용하여 생동감 추가.
 
-15단계: 모바일 채팅창 UX 개선 (키보드 대응)
-[기능 추가] 채팅 입력 시 키패드에 가려지지 않도록 채팅창 축소/확대 기능 구현.
+문제: 정답 팝업이 뜨자마자 퀴즈 종료 패킷 때문에 순식간에 사라지는 문제 발생.
+해결: PopupManager 수정: 종료 패킷이 와도 팝업을 즉시 끄지 않고, 코루틴을 사용해 등장 애니메이션 -> 3초 대기 -> 종료 순으로 제어.
 
-[이슈] 유니티 에디터 테스트 시, 채팅창이 축소되지 않고 오히려 커지는 현상 발생.
 
-[원인] 반응형 계산 로직(전체 - 키보드)에서 에디터 해상도가 커서 발생한 문제.
 
-[해결] 복잡한 계산 대신 **"입력 시 고정된 최소 높이로 축소"**하는 방식(방법 A) 채택 및 Adjust Pan 설정 권장.
+14단계: 모바일 채팅창 UX 개선
+목표: 모바일 환경에 맞는 UI 크기및 앵커 수정
 
-[이슈] 전송 버튼을 누르면 포커스가 풀리면서 채팅창이 덜컥거리는(확대되었다가 다시 줄어드는) 현상 발생.
+작업: 
+배경 UI 수정
+UI크기 세로모드 모바일 환경에 맞게 수정(앵커,크기)
+모바일 환경에 맞게 폰트 사이즈 늘리기
+채팅 입력 시 키패드에 가려지지 않도록 채팅창 축소/확대 기능 구현.
 
-[해결] SendButtonTrigger.cs(OnPointerDown)를 추가하여, 전송 버튼을 누르는 순간 확대 로직을 차단(BlockNextExpand)하여 해결.
+문제1: 채팅바 버튼을 눌러 입력후 전송 버튼을 누르면 채팅창이 확대되는 현상 발생
+해결: SendButtonTrigger.cs(OnPointerDown)를 추가하여, 전송 버튼을 누르는 순간 확대 로직을 차단(BlockNextExpand)하여 해결.
+문제2: 채팅입력을 마치고 채팅창 확대시 채팅장이 최상단으로 이동하는 현상 발생
+해결: 채팅이 아래에서부터 쌓이도록 Content의 Pivot과 Alignment를 하단 기준으로 변경.
 
-[기능 추가] 채팅이 아래에서부터 쌓이도록 Content의 Pivot과 Alignment를 하단 기준으로 변경.
 
-16단계: 안드로이드 빌드 및 환경 설정
-[오류] 빌드 시 "Unsupported Input Handling" 경고 발생.
 
-[시도] Active Input Handling을 Input Manager (Old)로 변경.
+15단계: 안드로이드 빌드 및 환경 설정
+문제1: 빌드 시 "Unsupported Input Handling" 경고 발생.
+Active Input Handling을 Input Manager (Old)로 변경.
+해결: "JDK not found" 오류 발생 → 유니티 허브/Preference에서 JDK 경로 재설정 완료.
 
-[오류] "JDK not found" 오류 발생 → 유니티 허브/Preference에서 JDK 경로 재설정 완료.
+문제2: Nox(앱플레이어)에서 실행 시 검은 화면 발생.
+에뮬레이터(x86)와 앱(ARM64) 간의 아키텍처 불일치 및 Vulkan 그래픽 API 호환성 문제.
+해결: Vulkan 제거 및 x86-64 아키텍처 추가 (또는 Mono 빌드 시도).
 
-[오류] Nox(앱플레이어)에서 실행 시 검은 화면 발생.
 
-[원인] 에뮬레이터(x86)와 앱(ARM64) 간의 아키텍처 불일치 및 Vulkan 그래픽 API 호환성 문제.
 
-[해결] Vulkan 제거 및 x86-64 아키텍처 추가 (또는 Mono 빌드 시도).
-
-17단계: 크래시 해결 및 입력 시스템 최종 전환
-[오류] 검은 화면은 해결됐으나, 앱 실행 후 기능이 먹통(터치 불가) 되는 현상 발생.
-
-[로그 분석] SIGSEGV (Signal 11) 크래시 및 Input System 관련 충돌 확인.
-
-[원인] 프로젝트 설정은 Old인데, 씬의 EventSystem에는 New Input Module이 붙어있어 터치 입력이 차단됨.
-
-[결정] "Unity 6 표준인 New Input System으로 완전히 전환하자!"
-
-[최종 수정]
-
+16단계: 크래시 해결 및 입력 시스템 최종 전환
+문제1: 검은 화면은 해결됐으나, 앱 실행 후 기능이 먹통(터치 불가) 되는 현상 발생.
+과정: SIGSEGV (Signal 11) 크래시 및 Input System 관련 충돌 확인.
+원인: 프로젝트 설정은 Old인데, 씬의 EventSystem에는 New Input Module이 붙어있어 터치 입력이 차단됨.
+해결: Unity 6 표준인 New Input System으로 완전히 전환
 Project Settings → Input System Package (New)로 변경.
-
 ChatUI.cs 코드 수정 (Input.GetKey 제거 → Keyboard.current 사용).
-
 EventSystem 컴포넌트 교체 (Input System UI Input Module).
-
-[핵심] 에디터 클릭 불량 해결: Input Module의 "Create Default Input Actions" 버튼을 눌러 마우스/터치 매핑 연결.
